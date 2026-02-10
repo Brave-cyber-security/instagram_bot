@@ -83,15 +83,18 @@ async def recognize_song_audd(audio_path: str, api_token: str = "") -> SongInfo 
 
 
 def _sync_download_song(query: str, output_dir: Path) -> str | None:
+    from config import YOUTUBE_COOKIES_FILE
     ffmpeg_path = get_ffmpeg_path()
     
     ydl_opts = {
         'format': 'bestaudio/best',
-        'outtmpl': str(output_dir / '%(title).50s.%(ext)s'),
+        'outtmpl': str(output_dir / '%(title)s.%(ext)s'),
+        'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
         'default_search': 'ytsearch1',
         'ffmpeg_location': ffmpeg_path,
+        'cookiefile': str(YOUTUBE_COOKIES_FILE) if YOUTUBE_COOKIES_FILE else None,
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',

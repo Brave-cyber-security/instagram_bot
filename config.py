@@ -18,6 +18,12 @@ COOKIES_FILE: Path | None = Path(__file__).parent / "instagram.com_cookies.txt"
 if not COOKIES_FILE.exists():
     COOKIES_FILE = None
 
+YOUTUBE_COOKIES_FILE: Path | None = Path(__file__).parent / "cookies.txt"
+if not YOUTUBE_COOKIES_FILE.exists():
+    YOUTUBE_COOKIES_FILE = Path(__file__).parent / "youtube.com_cookies.txt"
+    if not YOUTUBE_COOKIES_FILE.exists():
+        YOUTUBE_COOKIES_FILE = None
+
 MAX_FILE_SIZE: int = 50 * 1024 * 1024
 
 AUDD_API_TOKEN: str = os.getenv("AUDD_API_TOKEN", "")

@@ -116,7 +116,7 @@ def _sync_download_video(url: str, quality: str, download_dir: Path) -> dict:
     
     output_template = str(download_dir / "%(title).50s.%(ext)s")
     
-    from config import get_ffmpeg_path
+    from config import get_ffmpeg_path, YOUTUBE_COOKIES_FILE
     ffmpeg_path = get_ffmpeg_path()
     
     ydl_opts = {
@@ -126,6 +126,7 @@ def _sync_download_video(url: str, quality: str, download_dir: Path) -> dict:
         'no_warnings': True,
         'merge_output_format': 'mp4',
         'ffmpeg_location': ffmpeg_path,
+        'cookiefile': str(YOUTUBE_COOKIES_FILE) if YOUTUBE_COOKIES_FILE else None,
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',

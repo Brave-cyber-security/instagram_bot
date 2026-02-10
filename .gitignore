@@ -1,5 +1,8 @@
 # Environment variables
 .env
+cookies.txt
+instagram.com_cookies.txt
+youtube.com_cookies.txt
 
 # Python
 __pycache__/
