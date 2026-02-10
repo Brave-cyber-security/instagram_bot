@@ -94,15 +94,16 @@ def is_valid_youtube_url(url: str) -> bool:
 
 
 def get_ffmpeg_path() -> str:
+    """FFmpeg yo'lini aniqlash: system PATH → imageio-ffmpeg."""
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
+
     try:
         import imageio_ffmpeg
         return imageio_ffmpeg.get_ffmpeg_exe()
     except ImportError:
         pass
-    
-    system_ffmpeg = shutil.which("ffmpeg")
-    if system_ffmpeg:
-        return system_ffmpeg
     
     possible_paths = [
         Path(os.getcwd()) / "bin" / "ffmpeg.exe",
