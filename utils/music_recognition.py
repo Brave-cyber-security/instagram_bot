@@ -95,6 +95,7 @@ def _sync_download_song(query: str, output_dir: Path) -> str | None:
         'default_search': 'ytsearch1',
         'ffmpeg_location': ffmpeg_path,
         'js_runtimes': {'node': {}, 'deno': {}},
+        'remote_components': ['ejs:github'],
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',

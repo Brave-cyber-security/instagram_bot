@@ -77,6 +77,7 @@ def _get_common_ydl_opts() -> dict[str, Any]:
         'quiet': True,
         'no_warnings': True,
         'js_runtimes': {'node': {}, 'deno': {}},
+        'remote_components': ['ejs:github'],
     }
     
     if YOUTUBE_COOKIES_FILE:
