@@ -79,6 +79,9 @@ def extract_audio_from_video(video_path: str, output_path: str, start_sec: float
 
 async def recognize_song_audd(audio_path: str, api_token: str = "") -> SongInfo | None:
     try:
+        file_size = Path(audio_path).stat().st_size
+        logger.info(f"Sending audio to AudD API (size: {file_size} bytes, token: {'custom' if api_token else 'test'})")
+        
         with open(audio_path, "rb") as f:
             audio_data = base64.b64encode(f.read()).decode()
         
@@ -93,9 +96,13 @@ async def recognize_song_audd(audio_path: str, api_token: str = "") -> SongInfo 
                 if resp.status == 200:
                     result = await resp.json()
                     
-                    logger.debug(f"AudD API response status: {result.get('status')}, has result: {result.get('result') is not None}")
+                    logger.info(f"AudD API response: status={result.get('status')}, result={'found' if result.get('result') else 'none'}")
                     
-                    if result.get("status") == "success" and result.get("result"):
+                    if result.get("status") != "success":
+                        logger.warning(f"AudD API error: {result.get('error', {}).get('error_message', 'unknown')}")
+                        return None
+                    
+                    if result.get("result"):
                         song = result["result"]
                         return SongInfo(
                             title=song.get("title", "Unknown"),
@@ -103,6 +110,8 @@ async def recognize_song_audd(audio_path: str, api_token: str = "") -> SongInfo 
                             album=song.get("album", ""),
                             youtube_query=f"{song.get('artist', '')} {song.get('title', '')} official audio"
                         )
+                else:
+                    logger.error(f"AudD API HTTP error: {resp.status}")
     except Exception as e:
         logger.error(f"AudD recognition failed: {e}")
     
