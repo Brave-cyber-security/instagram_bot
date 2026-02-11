@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 from typing import TypedDict
 import yt_dlp
+from shazamio import Shazam, Serialize
 from concurrent.futures import ThreadPoolExecutor
 
 from config import TEMP_DIR, get_ffmpeg_path
@@ -75,6 +76,40 @@ def extract_audio_from_video(video_path: str, output_path: str, start_sec: float
     except Exception as e:
         logger.error(f"Audio extraction failed: {e}")
         return False
+
+
+async def recognize_song_shazam(audio_path: str) -> SongInfo | None:
+    """Shazam orqali musiqa aniqlash — bepul, API key kerak emas."""
+    try:
+        shazam = Shazam()
+        result = await shazam.recognize(audio_path)
+        
+        track = result.get("track")
+        if track:
+            title = track.get("title", "Unknown")
+            artist = track.get("subtitle", "Unknown")
+            # Metadata dan album olish
+            album = ""
+            for section in track.get("sections", []):
+                if section.get("type") == "SONG":
+                    for meta in section.get("metadata", []):
+                        if meta.get("title") == "Album":
+                            album = meta.get("text", "")
+                            break
+            
+            logger.info(f"Shazam recognized: {artist} - {title}")
+            return SongInfo(
+                title=title,
+                artist=artist,
+                album=album,
+                youtube_query=f"{artist} {title} official audio"
+            )
+        else:
+            logger.info("Shazam: no track found in audio")
+    except Exception as e:
+        logger.error(f"Shazam recognition failed: {e}")
+    
+    return None
 
 
 async def recognize_song_audd(audio_path: str, api_token: str = "") -> SongInfo | None:
@@ -195,7 +230,13 @@ async def recognize_only(video_path: str, api_token: str = "") -> SongInfo | Non
                 logger.warning(f"Could not extract audio from segment {i+1} (start={start_sec:.1f}s)")
                 continue
             
-            song_info = await recognize_song_audd(audio_path, api_token)
+            # 1. Shazam bilan sinash (bepul, aniqroq)
+            song_info = await recognize_song_shazam(audio_path)
+            
+            # 2. Agar Shazam topmasa — AudD bilan sinash (fallback)
+            if not song_info and api_token:
+                logger.info("Shazam failed, trying AudD as fallback...")
+                song_info = await recognize_song_audd(audio_path, api_token)
             
             # Temp faylni o'chirish
             try:
@@ -239,7 +280,13 @@ async def recognize_and_download(video_path: str, output_dir: Path, api_token: s
             logger.warning(f"Could not extract audio from segment {i+1}")
             continue
         
-        song_info = await recognize_song_audd(audio_path, api_token)
+        # 1. Shazam bilan sinash (bepul, aniqroq)
+        song_info = await recognize_song_shazam(audio_path)
+        
+        # 2. Agar Shazam topmasa — AudD bilan sinash (fallback)
+        if not song_info and api_token:
+            logger.info("Shazam failed, trying AudD as fallback...")
+            song_info = await recognize_song_audd(audio_path, api_token)
         
         try:
             Path(audio_path).unlink()
