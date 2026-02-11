@@ -83,18 +83,20 @@ async def recognize_song_audd(audio_path: str, api_token: str = "") -> SongInfo 
 
 
 def _sync_download_song(query: str, output_dir: Path) -> str | None:
-    from config import YOUTUBE_COOKIES_FILE
     ffmpeg_path = get_ffmpeg_path()
     
     ydl_opts = {
-        'format': 'bestaudio/best',
+        'format': 'bestaudio[ext=m4a]/bestaudio/best',
         'outtmpl': str(output_dir / '%(title)s.%(ext)s'),
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
         'default_search': 'ytsearch1',
         'ffmpeg_location': ffmpeg_path,
-        'cookiefile': str(YOUTUBE_COOKIES_FILE) if YOUTUBE_COOKIES_FILE else None,
+        'js_runtimes': {'node': {}, 'deno': {}},
+        'extractor_args': {'youtube': {
+            'player_client': ['default', 'android_vr'],
+        }},
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -103,7 +105,7 @@ def _sync_download_song(query: str, output_dir: Path) -> str | None:
     }
     
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
             ydl.download([query])
         
         for file in output_dir.iterdir():

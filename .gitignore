@@ -31,3 +31,8 @@ logs/
 # OS
 .DS_Store
 Thumbs.db
+
+# Cookies (shaxsiy autentifikatsiya fayllari)
+*.cookies.txt
+*_cookies.txt
+cookies.txt

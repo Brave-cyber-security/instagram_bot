@@ -5,7 +5,7 @@ import os
 import shutil
 import uuid
 from pathlib import Path
-from typing import TypedDict, Literal
+from typing import Any, TypedDict
 from concurrent.futures import ThreadPoolExecutor
 import yt_dlp
 from config import TEMP_DIR, MAX_FILE_SIZE
@@ -65,17 +65,28 @@ def get_cached_url(url_hash: str) -> str | None:
     return _url_cache.get(url_hash)
 
 
-def _sync_get_video_info(url: str) -> dict:
-    ydl_opts = {
+def _get_common_ydl_opts() -> dict[str, Any]:
+    """yt-dlp uchun umumiy sozlamalar."""
+    return {
         'quiet': True,
         'no_warnings': True,
+        'js_runtimes': {'node': {}, 'deno': {}},
+        'extractor_args': {'youtube': {
+            'player_client': ['default', 'android_vr'],
+        }},
+    }
+
+
+def _sync_get_video_info(url: str) -> dict[str, Any]:
+    ydl_opts: dict[str, Any] = {
+        **_get_common_ydl_opts(),
         'extract_flat': False,
     }
     
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
             info = ydl.extract_info(url, download=False)
-            return info
+            return dict(info)  # type: ignore[arg-type]
     except Exception as e:
         logger.error(f"Error getting video info: {e}")
         raise YouTubeDownloadError(str(e), "info_failed")
@@ -104,29 +115,36 @@ async def get_video_info(url: str) -> YouTubeVideoInfo:
         raise YouTubeDownloadError(str(e), "info_failed")
 
 
-def _sync_download_video(url: str, quality: str, download_dir: Path) -> dict:
-    format_str = "best"
-    is_audio = False
-    
-    for q in QUALITY_OPTIONS:
-        if q["id"] == quality:
-            format_str = q["format"]
-            is_audio = quality == "audio"
-            break
-    
+def _sync_download_video(url: str, quality: str, download_dir: Path) -> dict[str, Any]:
+    is_audio = quality == "audio"
     output_template = str(download_dir / "%(title).50s.%(ext)s")
     
-    from config import get_ffmpeg_path, YOUTUBE_COOKIES_FILE
+    from config import get_ffmpeg_path
     ffmpeg_path = get_ffmpeg_path()
     
-    ydl_opts = {
+    if is_audio:
+        format_str = "bestaudio[ext=m4a]/bestaudio/best"
+        merge_format = None
+    else:
+        if quality in ["1080", "720", "480", "360"]:
+            height = quality
+            format_str = (
+                f"bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/"
+                f"bestvideo[height<={height}]+bestaudio/"
+                f"best[height<={height}]/best"
+            )
+        else:
+            format_str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
+        merge_format = 'mp4'
+    
+    ydl_opts: dict[str, Any] = {
+        **_get_common_ydl_opts(),
         'format': format_str,
         'outtmpl': output_template,
         'quiet': True,
         'no_warnings': True,
-        'merge_output_format': 'mp4',
+        'merge_output_format': merge_format,
         'ffmpeg_location': ffmpeg_path,
-        'cookiefile': str(YOUTUBE_COOKIES_FILE) if YOUTUBE_COOKIES_FILE else None,
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -135,9 +153,9 @@ def _sync_download_video(url: str, quality: str, download_dir: Path) -> dict:
     }
     
     try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
             info = ydl.extract_info(url, download=True)
-            return info
+            return dict(info)  # type: ignore[arg-type]
     except Exception as e:
         error_msg = str(e).lower()
         if "private" in error_msg:
