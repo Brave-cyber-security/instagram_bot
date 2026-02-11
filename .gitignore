@@ -33,6 +33,5 @@ logs/
 Thumbs.db
 
 # Cookies (shaxsiy autentifikatsiya fayllari)
-*.cookies.txt
-*_cookies.txt
-cookies.txt
+# Instagram cookies — push qilinmasin (shaxsiy)
+instagram.com_cookies.txt

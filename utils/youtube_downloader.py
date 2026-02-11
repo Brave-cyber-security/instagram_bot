@@ -66,15 +66,34 @@ def get_cached_url(url_hash: str) -> str | None:
 
 
 def _get_common_ydl_opts() -> dict[str, Any]:
-    """yt-dlp uchun umumiy sozlamalar."""
-    return {
+    """yt-dlp uchun umumiy sozlamalar.
+    
+    Serverda (Docker): cookies mavjud → cookies + default client ishlatiladi.
+    Lokalda: cookies yo'q → android_vr client ishlatiladi (cookies kerak emas).
+    """
+    from config import YOUTUBE_COOKIES_FILE
+    
+    opts: dict[str, Any] = {
         'quiet': True,
         'no_warnings': True,
         'js_runtimes': {'node': {}, 'deno': {}},
-        'extractor_args': {'youtube': {
-            'player_client': ['default', 'android_vr'],
-        }},
     }
+    
+    if YOUTUBE_COOKIES_FILE:
+        # Cookies mavjud (server) — cookies bilan autentifikatsiya
+        # android_vr cookies qo'llab-quvvatlamaydi, shuning uchun ishlatmaymiz
+        opts['cookiefile'] = str(YOUTUBE_COOKIES_FILE)
+        opts['extractor_args'] = {'youtube': {
+            'player_client': ['default'],
+        }}
+        logger.info("Using YouTube cookies for authentication")
+    else:
+        # Cookies yo'q (lokal) — android_vr orqali (cookies kerak emas)
+        opts['extractor_args'] = {'youtube': {
+            'player_client': ['default', 'android_vr'],
+        }}
+    
+    return opts
 
 
 def _sync_get_video_info(url: str) -> dict[str, Any]:
