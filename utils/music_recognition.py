@@ -1,6 +1,7 @@
 import asyncio
 import aiohttp
 import base64
+import json
 import logging
 import shutil
 import subprocess
@@ -28,25 +29,49 @@ class MusicRecognitionError(Exception):
         super().__init__(self.message)
 
 
-def extract_audio_from_video(video_path: str, output_path: str) -> bool:
+def _get_video_duration(video_path: str) -> float:
+    """Video davomiyligini sekundlarda qaytaradi."""
+    ffmpeg_exe = get_ffmpeg_path()
+    # ffprobe yoki ffmpeg orqali duration olish
+    ffprobe_exe = str(ffmpeg_exe).replace("ffmpeg", "ffprobe")
+    cmd = [
+        ffprobe_exe,
+        "-v", "quiet",
+        "-print_format", "json",
+        "-show_format",
+        video_path,
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=15, text=True)
+        if result.returncode == 0:
+            data = json.loads(result.stdout)
+            return float(data.get("format", {}).get("duration", 0))
+    except Exception:
+        pass
+    return 0.0
+
+
+def extract_audio_from_video(video_path: str, output_path: str, start_sec: float = 0) -> bool:
+    """Video dan audio chiqarish. start_sec — qaysi sekunddan boshlash."""
     ffmpeg_exe = get_ffmpeg_path()
     
     cmd = [
         str(ffmpeg_exe),
+        "-ss", str(start_sec),
         "-i", video_path,
         "-vn",
         "-acodec", "libmp3lame",
         "-ar", "44100",
         "-ac", "2",
         "-b:a", "128k",
-        "-t", "15",  
+        "-t", "20",
         "-y",
         output_path
     ]
     
     try:
         result = subprocess.run(cmd, capture_output=True, timeout=30)
-        return Path(output_path).exists()
+        return Path(output_path).exists() and Path(output_path).stat().st_size > 1000
     except Exception as e:
         logger.error(f"Audio extraction failed: {e}")
         return False
@@ -67,6 +92,8 @@ async def recognize_song_audd(audio_path: str, api_token: str = "") -> SongInfo 
             async with session.post("https://api.audd.io/", data=data) as resp:
                 if resp.status == 200:
                     result = await resp.json()
+                    
+                    logger.debug(f"AudD API response status: {result.get('status')}, has result: {result.get('result') is not None}")
                     
                     if result.get("status") == "success" and result.get("result"):
                         song = result["result"]
@@ -138,19 +165,41 @@ async def recognize_only(video_path: str, api_token: str = "") -> SongInfo | Non
     audio_dir = Path(video_path).parent
     audio_path = str(audio_dir / "temp_audio_recognize.mp3")
     
+    # Video davomiyligini aniqlash
+    duration = _get_video_duration(video_path)
+    logger.info(f"Video duration: {duration:.1f}s")
+    
+    # Sinab ko'rish kerak bo'lgan segmentlar (sekundlarda)
+    segments = [0]  # har doim boshidan sinash
+    if duration > 30:
+        segments.append(duration * 0.3)  # 30% dan
+    if duration > 60:
+        segments.append(duration * 0.5)  # o'rtasidan
+    if duration > 15:
+        segments.append(max(5, duration * 0.15))  # 15% dan
+    
     try:
-        if not extract_audio_from_video(video_path, audio_path):
-            logger.warning("Could not extract audio from video")
-            return None
+        for i, start_sec in enumerate(segments):
+            logger.info(f"Trying segment {i+1}/{len(segments)}: start={start_sec:.1f}s")
+            
+            if not extract_audio_from_video(video_path, audio_path, start_sec=start_sec):
+                logger.warning(f"Could not extract audio from segment {i+1} (start={start_sec:.1f}s)")
+                continue
+            
+            song_info = await recognize_song_audd(audio_path, api_token)
+            
+            # Temp faylni o'chirish
+            try:
+                Path(audio_path).unlink(missing_ok=True)
+            except:
+                pass
+            
+            if song_info:
+                logger.info(f"Recognized (segment {i+1}): {song_info['artist']} - {song_info['title']}")
+                return song_info
         
-        song_info = await recognize_song_audd(audio_path, api_token)
-        
-        if not song_info:
-            logger.info("No song recognized in video")
-            return None
-        
-        logger.info(f"Recognized: {song_info['artist']} - {song_info['title']}")
-        return song_info
+        logger.info(f"No song recognized in video after trying {len(segments)} segments")
+        return None
     finally:
         try:
             Path(audio_path).unlink(missing_ok=True)
@@ -161,22 +210,40 @@ async def recognize_only(video_path: str, api_token: str = "") -> SongInfo | Non
 async def recognize_and_download(video_path: str, output_dir: Path, api_token: str = "") -> tuple[SongInfo | None, str | None]:
     audio_path = str(output_dir / "temp_audio.mp3")
     
-    if not extract_audio_from_video(video_path, audio_path):
-        logger.warning("Could not extract audio from video")
-        return None, None
+    # Video davomiyligini aniqlash
+    duration = _get_video_duration(video_path)
+    logger.info(f"Video duration: {duration:.1f}s")
     
-    song_info = await recognize_song_audd(audio_path, api_token)
+    segments = [0]
+    if duration > 30:
+        segments.append(duration * 0.3)
+    if duration > 60:
+        segments.append(duration * 0.5)
+    if duration > 15:
+        segments.append(max(5, duration * 0.15))
     
-    try:
-        Path(audio_path).unlink()
-    except:
-        pass
+    song_info = None
+    for i, start_sec in enumerate(segments):
+        logger.info(f"Trying segment {i+1}/{len(segments)}: start={start_sec:.1f}s")
+        
+        if not extract_audio_from_video(video_path, audio_path, start_sec=start_sec):
+            logger.warning(f"Could not extract audio from segment {i+1}")
+            continue
+        
+        song_info = await recognize_song_audd(audio_path, api_token)
+        
+        try:
+            Path(audio_path).unlink()
+        except:
+            pass
+        
+        if song_info:
+            logger.info(f"Recognized (segment {i+1}): {song_info['artist']} - {song_info['title']}")
+            break
     
     if not song_info:
-        logger.info("No song recognized in video")
+        logger.info(f"No song recognized in video after trying {len(segments)} segments")
         return None, None
-    
-    logger.info(f"Recognized: {song_info['artist']} - {song_info['title']}")
     
     song_path = await download_full_song(song_info, output_dir)
     
