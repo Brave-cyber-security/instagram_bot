@@ -154,21 +154,91 @@ def _classify_error(error_msg: str) -> str:
     return "unknown"
 
 
-# ===== Piped / Cobalt API fallback (YouTube bot detection uchun) =====
+# ===== Piped / Invidious / Cobalt API fallback (YouTube bot detection uchun) =====
 
-PIPED_INSTANCES = [
+# Fallback (hardcoded) instancelar — dinamik ro'yxat ishlamasa ishlatiladi
+_FALLBACK_PIPED = [
     "https://pipedapi.kavin.rocks",
-    "https://api.piped.privacydev.net",
-    "https://pipedapi.darkness.services",
-    "https://pipedapi.osphost.fi",
+    "https://pipedapi.adminforge.de",
+]
+_FALLBACK_INVIDIOUS = [
+    "https://vid.puffyan.us",
+    "https://invidious.fdn.fr",
+    "https://yt.artemislena.eu",
 ]
 
-INVIDIOUS_INSTANCES = [
-    "https://inv.nadeko.net",
-    "https://invidious.nerdvpn.de",
-    "https://iv.datura.network",
-    "https://inv.tux.pizza",
-]
+# Keshlar (bir marta olib, qayta ishlatish)
+_cached_piped: list[str] | None = None
+_cached_invidious: list[str] | None = None
+_cache_time: float = 0
+_CACHE_TTL = 3600  # 1 soat
+
+
+def _fetch_piped_instances() -> list[str]:
+    """Piped instances ro'yxatini API dan olish."""
+    global _cached_piped, _cache_time
+    import time
+    now = time.time()
+    if _cached_piped and (now - _cache_time) < _CACHE_TTL:
+        return _cached_piped
+
+    instances: list[str] = []
+    try:
+        resp = requests.get(
+            "https://piped-instances.kavin.rocks/",
+            timeout=10,
+            headers={'User-Agent': 'Mozilla/5.0'},
+        )
+        if resp.status_code == 200:
+            for item in resp.json():
+                api_url = item.get('api_url', '').rstrip('/')
+                if api_url and api_url.startswith('https://'):
+                    instances.append(api_url)
+            if instances:
+                logger.info(f"Fetched {len(instances)} Piped instances")
+                _cached_piped = instances[:8]  # top 8 ta
+                _cache_time = now
+                return _cached_piped
+    except Exception as e:
+        logger.warning(f"Failed to fetch Piped instances: {e}")
+
+    return _FALLBACK_PIPED
+
+
+def _fetch_invidious_instances() -> list[str]:
+    """Invidious instances ro'yxatini API dan olish."""
+    global _cached_invidious, _cache_time
+    import time
+    now = time.time()
+    if _cached_invidious and (now - _cache_time) < _CACHE_TTL:
+        return _cached_invidious
+
+    instances: list[str] = []
+    try:
+        resp = requests.get(
+            "https://api.invidious.io/instances.json?sort_by=api,health",
+            timeout=10,
+            headers={'User-Agent': 'Mozilla/5.0'},
+        )
+        if resp.status_code == 200:
+            for item in resp.json():
+                if len(item) >= 2 and isinstance(item[1], dict):
+                    info = item[1]
+                    uri = info.get('uri', '').rstrip('/')
+                    api_ok = info.get('api', False)
+                    itype = info.get('type', '')
+                    if uri and api_ok and itype == 'https':
+                        instances.append(uri)
+            if instances:
+                logger.info(f"Fetched {len(instances)} Invidious instances")
+                _cached_invidious = instances[:8]  # top 8 ta
+                _cache_time = now
+                return _cached_invidious
+    except Exception as e:
+        logger.warning(f"Failed to fetch Invidious instances: {e}")
+
+    return _FALLBACK_INVIDIOUS
+
 
 COBALT_API_KEY = os.getenv("COBALT_API_KEY", "")
 COBALT_INSTANCES = [
@@ -186,7 +256,8 @@ def _extract_video_id(url: str) -> str | None:
 
 def _piped_get_streams(video_id: str) -> dict[str, Any] | None:
     """Piped API orqali video stream ma'lumotlarini olish."""
-    for instance in PIPED_INSTANCES:
+    instances = _fetch_piped_instances()
+    for instance in instances:
         try:
             url = f"{instance}/streams/{video_id}"
             logger.info(f"Trying Piped: {url}")
@@ -375,7 +446,8 @@ def _invidious_get_video_info(url: str) -> dict[str, Any] | None:
     video_id = _extract_video_id(url)
     if not video_id:
         return None
-    for instance in INVIDIOUS_INSTANCES:
+    instances = _fetch_invidious_instances()
+    for instance in instances:
         try:
             logger.info(f"Trying Invidious info: {instance}")
             resp = requests.get(
@@ -411,7 +483,8 @@ def _invidious_download_video(
     if not video_id:
         return None
 
-    for instance in INVIDIOUS_INSTANCES:
+    instances = _fetch_invidious_instances()
+    for instance in instances:
         try:
             logger.info(f"Trying Invidious download: {instance}")
             resp = requests.get(

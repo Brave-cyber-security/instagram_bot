@@ -245,13 +245,8 @@ def _sync_download_song(query: str, output_dir: Path) -> str | None:
 
 
 # ===== Piped API fallback for song download =====
-
-PIPED_INSTANCES = [
-    "https://pipedapi.kavin.rocks",
-    "https://api.piped.privacydev.net",
-    "https://pipedapi.darkness.services",
-    "https://pipedapi.osphost.fi",
-]
+# Dinamik instancelarni youtube_downloader dan import qilish
+from utils.youtube_downloader import _fetch_piped_instances
 
 
 def _piped_download_song(query: str, output_dir: Path) -> str | None:
@@ -259,8 +254,9 @@ def _piped_download_song(query: str, output_dir: Path) -> str | None:
     ffmpeg_path = get_ffmpeg_path()
     
     # 1. Piped orqali qidirish
+    piped_instances = _fetch_piped_instances()
     video_id = None
-    for instance in PIPED_INSTANCES:
+    for instance in piped_instances:
         try:
             resp = requests.get(
                 f"{instance}/search",
@@ -290,7 +286,7 @@ def _piped_download_song(query: str, output_dir: Path) -> str | None:
         return None
     
     # 2. Piped orqali stream olish
-    for instance in PIPED_INSTANCES:
+    for instance in piped_instances:
         try:
             resp = requests.get(
                 f"{instance}/streams/{video_id}",
