@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=3)
 
 _loader: instaloader.Instaloader | None = None
+_loader_noauth: instaloader.Instaloader | None = None
+_cookies_valid: bool = True
 
 
 def _parse_netscape_cookies(cookies_file: Path) -> dict[str, str]:
@@ -43,23 +45,47 @@ def _parse_netscape_cookies(cookies_file: Path) -> dict[str, str]:
     return cookies
 
 
+def _create_loader() -> instaloader.Instaloader:
+    """Yangi instaloader instance yaratish."""
+    return instaloader.Instaloader(
+        download_videos=True,
+        download_video_thumbnails=False,
+        download_geotags=False,
+        download_comments=False,
+        save_metadata=False,
+        compress_json=False,
+        post_metadata_txt_pattern="",
+        max_connection_attempts=2,
+        request_timeout=30,
+        quiet=True,
+    )
+
+
 def _get_loader() -> instaloader.Instaloader:
-    global _loader
+    """Asosiy loader (cookies bilan)."""
+    global _loader, _cookies_valid
     if _loader is None:
-        _loader = instaloader.Instaloader(
-            download_videos=True,
-            download_video_thumbnails=False,
-            download_geotags=False,
-            download_comments=False,
-            save_metadata=False,
-            compress_json=False,
-            post_metadata_txt_pattern="",
-            max_connection_attempts=3,
-            request_timeout=60,
-            quiet=True,
-        )
-        _try_load_session(_loader)
+        _loader = _create_loader()
+        if not _try_load_session(_loader):
+            _cookies_valid = False
     return _loader
+
+
+def _get_loader_noauth() -> instaloader.Instaloader:
+    """Autentifikatsiyasiz loader (cookies eskirganda)."""
+    global _loader_noauth
+    if _loader_noauth is None:
+        _loader_noauth = _create_loader()
+        logger.info("Created no-auth Instagram loader")
+    return _loader_noauth
+
+
+def _invalidate_cookies() -> None:
+    """Cookies eskirganligini belgilash."""
+    global _cookies_valid, _loader
+    _cookies_valid = False
+    _loader = None  # Keyingi urinishda yangidan yaratiladi
+    logger.warning("Instagram cookies invalidated")
 
 
 def _try_load_session(loader: instaloader.Instaloader) -> bool:
@@ -157,114 +183,184 @@ def _is_story_url(url: str) -> bool:
     return "instagram.com/stories/" in url
 
 
-def _sync_download_post(shortcode: str, download_dir: Path) -> tuple[list[str], str, str]:
-    loader = _get_loader()
+def _is_auth_error(error: Exception) -> bool:
+    """Xato autentifikatsiya bilan bog'liqmi?"""
+    msg = str(error).lower()
+    return any(s in msg for s in [
+        '401', '403', 'logged_out', 'login_required',
+        'unauthorized', 'checkpoint_required', 'please wait'
+    ])
+
+
+def _download_post_with_loader(
+    loader: instaloader.Instaloader,
+    shortcode: str,
+    download_dir: Path
+) -> tuple[list[str], str, str]:
+    """Berilgan loader bilan postni yuklab olish."""
+    post = instaloader.Post.from_shortcode(loader.context, shortcode)
     
+    caption = post.caption or ""
+    if len(caption) > 900:
+        caption = caption[:900] + "..."
+    
+    if post.typename == "GraphSidecar":
+        media_type = "album"
+    elif post.is_video:
+        media_type = "video"
+    else:
+        media_type = "photo"
+    
+    loader.dirname_pattern = str(download_dir)
+    loader.filename_pattern = "{shortcode}_{mediaid}"
+    
+    loader.download_post(post, target="")
+    
+    files = _collect_media_files(download_dir)
+    
+    return files, caption, media_type
+
+
+def _sync_download_post(shortcode: str, download_dir: Path) -> tuple[list[str], str, str]:
+    global _cookies_valid
+    
+    # 1. Cookies bilan sinash (agar hali valid bo'lsa)
+    if _cookies_valid:
+        try:
+            loader = _get_loader()
+            logger.info(f"Downloading post {shortcode} with cookies...")
+            return _download_post_with_loader(loader, shortcode, download_dir)
+        except Exception as e:
+            if _is_auth_error(e):
+                logger.warning(f"Cookies auth failed: {e}")
+                _invalidate_cookies()
+                # Temp fayllarni tozalash
+                for f in download_dir.iterdir():
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+            else:
+                # Auth bilan bog'liq bo'lmagan xato
+                _handle_instaloader_error(e, shortcode)
+    
+    # 2. Cookies ishlamadi — autentifikatsiyasiz sinash
     try:
-        post = instaloader.Post.from_shortcode(loader.context, shortcode)
-        
-        caption = post.caption or ""
-        if len(caption) > 900:
-            caption = caption[:900] + "..."
-        
-        if post.typename == "GraphSidecar":
-            media_type = "album"
-        elif post.is_video:
-            media_type = "video"
-        else:
-            media_type = "photo"
-        
-        loader.dirname_pattern = str(download_dir)
-        loader.filename_pattern = "{shortcode}_{mediaid}"
-        
-        loader.download_post(post, target="")
-        
-        files = _collect_media_files(download_dir)
-        
-        return files, caption, media_type
-        
+        loader_noauth = _get_loader_noauth()
+        logger.info(f"Downloading post {shortcode} without auth...")
+        return _download_post_with_loader(loader_noauth, shortcode, download_dir)
     except instaloader.exceptions.LoginRequiredException:
+        raise DownloadError("Bu kontent yopiq, login kerak", "private")
+    except Exception as e:
+        _handle_instaloader_error(e, shortcode)
+    
+    raise DownloadError("Download failed", "download_failed")  # unreachable
+
+
+def _handle_instaloader_error(e: Exception, context: str = "") -> None:
+    """Instaloader xatolarini qayta ishlash."""
+    if isinstance(e, instaloader.exceptions.LoginRequiredException):
         raise DownloadError("Login required for this content", "private")
-    except instaloader.exceptions.PrivateProfileNotFollowedException:
+    if isinstance(e, instaloader.exceptions.PrivateProfileNotFollowedException):
         raise DownloadError("This is a private profile", "private")
-    except instaloader.exceptions.ProfileNotExistsException:
+    if isinstance(e, instaloader.exceptions.ProfileNotExistsException):
         raise DownloadError("Profile or post not found", "not_found")
-    except instaloader.exceptions.PostChangedException:
+    if isinstance(e, instaloader.exceptions.PostChangedException):
         raise DownloadError("Post was deleted or changed", "not_found")
-    except instaloader.exceptions.QueryReturnedNotFoundException:
+    if isinstance(e, instaloader.exceptions.QueryReturnedNotFoundException):
         raise DownloadError("Content not found", "not_found")
-    except instaloader.exceptions.ConnectionException as e:
-        error_msg = str(e).lower()
+    if isinstance(e, instaloader.exceptions.ConnectionException):
         if "429" in str(e):
             raise DownloadError("Rate limited, please try again later", "rate_limit")
-        if "401" in str(e) or "403" in str(e):
+        if _is_auth_error(e):
             raise DownloadError("Authentication error", "private")
         raise DownloadError(f"Connection error: {e}", "download_failed")
-    except Exception as e:
-        logger.error(f"Error downloading post {shortcode}: {e}")
-        raise DownloadError(str(e), "download_failed")
+    logger.error(f"Error downloading {context}: {e}")
+    raise DownloadError(str(e), "download_failed")
+
+
+def _download_story_with_loader(
+    loader: instaloader.Instaloader,
+    username: str,
+    story_id: str,
+    download_dir: Path
+) -> tuple[list[str], str, str]:
+    """Berilgan loader bilan story yuklab olish."""
+    profile = instaloader.Profile.from_username(loader.context, username)
+    
+    loader.dirname_pattern = str(download_dir)
+    loader.filename_pattern = "{profile}_{mediaid}"
+    
+    stories = loader.get_stories(userids=[profile.userid])
+    
+    found_story = False
+    caption = ""
+    media_type = "video"
+    
+    for story in stories:
+        for item in story.get_items():
+            if str(item.mediaid) == story_id:
+                loader.download_storyitem(item, target="")
+                found_story = True
+                
+                if item.is_video:
+                    media_type = "video"
+                else:
+                    media_type = "photo"
+                
+                caption = item.caption or f"Story by @{username}"
+                break
+        
+        if found_story:
+            break
+    
+    if not found_story:
+        raise DownloadError("Story not found or has expired", "not_found")
+    
+    files = _collect_media_files(download_dir)
+    
+    if not files:
+        raise DownloadError("No story files downloaded", "download_failed")
+    
+    return files, caption, media_type
 
 
 def _sync_download_story(username: str, story_id: str, download_dir: Path) -> tuple[list[str], str, str]:
-    loader = _get_loader()
+    global _cookies_valid
     
+    # 1. Cookies bilan sinash
+    if _cookies_valid:
+        try:
+            loader = _get_loader()
+            logger.info(f"Downloading story {story_id} with cookies...")
+            return _download_story_with_loader(loader, username, story_id, download_dir)
+        except Exception as e:
+            if _is_auth_error(e):
+                logger.warning(f"Story cookies auth failed: {e}")
+                _invalidate_cookies()
+                for f in download_dir.iterdir():
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+            elif isinstance(e, DownloadError):
+                raise
+            else:
+                _handle_instaloader_error(e, f"story {story_id}")
+    
+    # 2. Autentifikatsiyasiz sinash
     try:
-        profile = instaloader.Profile.from_username(loader.context, username)
-        
-        loader.dirname_pattern = str(download_dir)
-        loader.filename_pattern = "{profile}_{mediaid}"
-        
-        stories = loader.get_stories(userids=[profile.userid])
-        
-        found_story = False
-        caption = ""
-        media_type = "video"
-        
-        for story in stories:
-            for item in story.get_items():
-                if str(item.mediaid) == story_id:
-                    loader.download_storyitem(item, target="")
-                    found_story = True
-                    
-                    if item.is_video:
-                        media_type = "video"
-                    else:
-                        media_type = "photo"
-                    
-                    caption = item.caption or f"Story by @{username}"
-                    break
-            
-            if found_story:
-                break
-        
-        if not found_story:
-            logger.warning(f"Story {story_id} not found in current stories, story may have expired")
-            raise DownloadError("Story not found or has expired", "not_found")
-        
-        files = _collect_media_files(download_dir)
-        
-        if not files:
-            raise DownloadError("No story files downloaded", "download_failed")
-        
-        return files, caption, media_type
-        
+        loader_noauth = _get_loader_noauth()
+        logger.info(f"Downloading story {story_id} without auth...")
+        return _download_story_with_loader(loader_noauth, username, story_id, download_dir)
     except DownloadError:
         raise
     except instaloader.exceptions.LoginRequiredException:
-        raise DownloadError("Login required for stories", "private")
-    except instaloader.exceptions.PrivateProfileNotFollowedException:
-        raise DownloadError("This is a private profile", "private")
-    except instaloader.exceptions.ProfileNotExistsException:
-        raise DownloadError("Profile not found", "not_found")
-    except instaloader.exceptions.ConnectionException as e:
-        if "429" in str(e):
-            raise DownloadError("Rate limited, please try again later", "rate_limit")
-        if "401" in str(e) or "403" in str(e):
-            raise DownloadError("Authentication required for stories", "private")
-        raise DownloadError(f"Connection error: {e}", "download_failed")
+        raise DownloadError("Stories uchun login kerak", "private")
     except Exception as e:
-        logger.error(f"Error downloading story {story_id} from {username}: {e}")
-        raise DownloadError(str(e), "download_failed")
+        _handle_instaloader_error(e, f"story {story_id}")  
+    
+    raise DownloadError("Story download failed", "download_failed")  # unreachable
 
 
 def _collect_media_files(download_dir: Path) -> list[str]:
