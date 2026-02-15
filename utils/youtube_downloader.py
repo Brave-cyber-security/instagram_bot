@@ -65,11 +65,11 @@ def get_cached_url(url_hash: str) -> str | None:
     return _url_cache.get(url_hash)
 
 
-def _get_common_ydl_opts() -> dict[str, Any]:
+def _get_common_ydl_opts(use_cookies: bool = True) -> dict[str, Any]:
     """yt-dlp uchun umumiy sozlamalar.
     
     Serverda (Docker): cookies mavjud → cookies + default client ishlatiladi.
-    Lokalda: cookies yo'q → android_vr client ishlatiladi (cookies kerak emas).
+    Lokalda yoki cookies ishlamasa: android_vr client ishlatiladi.
     """
     from config import YOUTUBE_COOKIES_FILE
     
@@ -80,26 +80,26 @@ def _get_common_ydl_opts() -> dict[str, Any]:
         'remote_components': ['ejs:github'],
     }
     
-    if YOUTUBE_COOKIES_FILE:
-        # Cookies mavjud (server) — cookies bilan autentifikatsiya
-        # android_vr cookies qo'llab-quvvatlamaydi, shuning uchun ishlatmaymiz
+    if use_cookies and YOUTUBE_COOKIES_FILE:
         opts['cookiefile'] = str(YOUTUBE_COOKIES_FILE)
         opts['extractor_args'] = {'youtube': {
             'player_client': ['default'],
         }}
         logger.info("Using YouTube cookies for authentication")
     else:
-        # Cookies yo'q (lokal) — android_vr orqali (cookies kerak emas)
         opts['extractor_args'] = {'youtube': {
             'player_client': ['default', 'android_vr'],
         }}
+        if not use_cookies:
+            logger.info("Retrying YouTube without cookies")
     
     return opts
 
 
 def _sync_get_video_info(url: str) -> dict[str, Any]:
+    # Avval cookies bilan sinash
     ydl_opts: dict[str, Any] = {
-        **_get_common_ydl_opts(),
+        **_get_common_ydl_opts(use_cookies=True),
         'extract_flat': False,
     }
     
@@ -108,6 +108,21 @@ def _sync_get_video_info(url: str) -> dict[str, Any]:
             info = ydl.extract_info(url, download=False)
             return dict(info)  # type: ignore[arg-type]
     except Exception as e:
+        error_msg = str(e).lower()
+        if "sign in" in error_msg or "bot" in error_msg or "cookies" in error_msg:
+            logger.warning("YouTube cookies expired, retrying without cookies...")
+            # Cookiessiz qayta urinish
+            ydl_opts = {
+                **_get_common_ydl_opts(use_cookies=False),
+                'extract_flat': False,
+            }
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
+                    info = ydl.extract_info(url, download=False)
+                    return dict(info)  # type: ignore[arg-type]
+            except Exception as e2:
+                logger.error(f"Error getting video info (no cookies): {e2}")
+                raise YouTubeDownloadError(str(e2), "info_failed")
         logger.error(f"Error getting video info: {e}")
         raise YouTubeDownloadError(str(e), "info_failed")
 
@@ -158,7 +173,7 @@ def _sync_download_video(url: str, quality: str, download_dir: Path) -> dict[str
         merge_format = 'mp4'
     
     ydl_opts: dict[str, Any] = {
-        **_get_common_ydl_opts(),
+        **_get_common_ydl_opts(use_cookies=True),
         'format': format_str,
         'outtmpl': output_template,
         'quiet': True,
@@ -178,6 +193,36 @@ def _sync_download_video(url: str, quality: str, download_dir: Path) -> dict[str
             return dict(info)  # type: ignore[arg-type]
     except Exception as e:
         error_msg = str(e).lower()
+        # Cookies xatosi bo'lsa — cookiessiz qayta urinish
+        if "sign in" in error_msg or "bot" in error_msg or "cookies" in error_msg:
+            logger.warning("YouTube cookies expired during download, retrying without cookies...")
+            ydl_opts_no_cookies: dict[str, Any] = {
+                **_get_common_ydl_opts(use_cookies=False),
+                'format': format_str,
+                'outtmpl': output_template,
+                'quiet': True,
+                'no_warnings': True,
+                'merge_output_format': merge_format,
+                'ffmpeg_location': ffmpeg_path,
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }] if is_audio else [],
+            }
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts_no_cookies) as ydl:  # type: ignore[arg-type]
+                    info = ydl.extract_info(url, download=True)
+                    return dict(info)  # type: ignore[arg-type]
+            except Exception as e2:
+                error_msg2 = str(e2).lower()
+                if "private" in error_msg2:
+                    raise YouTubeDownloadError("Video is private", "private")
+                if "unavailable" in error_msg2 or "not available" in error_msg2:
+                    raise YouTubeDownloadError("Video is unavailable", "not_found")
+                if "age" in error_msg2:
+                    raise YouTubeDownloadError("Age-restricted video", "age_restricted")
+                raise YouTubeDownloadError(str(e2), "download_failed")
         if "private" in error_msg:
             raise YouTubeDownloadError("Video is private", "private")
         if "unavailable" in error_msg or "not available" in error_msg:

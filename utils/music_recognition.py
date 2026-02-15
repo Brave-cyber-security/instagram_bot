@@ -15,6 +15,7 @@ from config import TEMP_DIR, get_ffmpeg_path
 
 logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=2)
+_audd_token_valid = True  # AudD token ishlayaptimi yoki yo'q
 
 
 class SongInfo(TypedDict):
@@ -113,6 +114,11 @@ async def recognize_song_shazam(audio_path: str) -> SongInfo | None:
 
 
 async def recognize_song_audd(audio_path: str, api_token: str = "") -> SongInfo | None:
+    global _audd_token_valid
+    
+    if not api_token or not _audd_token_valid:
+        return None
+    
     try:
         file_size = Path(audio_path).stat().st_size
         logger.info(f"Sending audio to AudD API (size: {file_size} bytes, token: {'custom' if api_token else 'test'})")
@@ -134,7 +140,12 @@ async def recognize_song_audd(audio_path: str, api_token: str = "") -> SongInfo 
                     logger.info(f"AudD API response: status={result.get('status')}, result={'found' if result.get('result') else 'none'}")
                     
                     if result.get("status") != "success":
-                        logger.warning(f"AudD API error: {result.get('error', {}).get('error_message', 'unknown')}")
+                        error_msg = result.get('error', {}).get('error_message', 'unknown')
+                        logger.warning(f"AudD API error: {error_msg}")
+                        # Token noto'g'ri bo'lsa, qayta urinmaslik
+                        if 'authorization' in error_msg.lower() or 'api_token' in error_msg.lower():
+                            _audd_token_valid = False
+                            logger.warning("AudD token invalid — disabling AudD for this session")
                         return None
                     
                     if result.get("result"):
@@ -157,7 +168,7 @@ def _sync_download_song(query: str, output_dir: Path) -> str | None:
     from config import YOUTUBE_COOKIES_FILE
     ffmpeg_path = get_ffmpeg_path()
     
-    ydl_opts: dict[str, object] = {
+    base_opts: dict[str, object] = {
         'format': 'bestaudio[ext=m4a]/bestaudio/best',
         'outtmpl': str(output_dir / '%(title)s.%(ext)s'),
         'noplaylist': True,
@@ -174,26 +185,34 @@ def _sync_download_song(query: str, output_dir: Path) -> str | None:
         }],
     }
     
-    # Cookies mavjud bo'lsa — server uchun
+    # Avval cookies bilan, keyin cookiessiz sinash
+    attempts = []
     if YOUTUBE_COOKIES_FILE:
-        ydl_opts['cookiefile'] = str(YOUTUBE_COOKIES_FILE)
-        ydl_opts['extractor_args'] = {'youtube': {
-            'player_client': ['default'],
-        }}
-    else:
-        ydl_opts['extractor_args'] = {'youtube': {
-            'player_client': ['default', 'android_vr'],
-        }}
+        attempts.append({
+            **base_opts,
+            'cookiefile': str(YOUTUBE_COOKIES_FILE),
+            'extractor_args': {'youtube': {'player_client': ['default']}},
+        })
+    # Cookiessiz variant (fallback)
+    attempts.append({
+        **base_opts,
+        'extractor_args': {'youtube': {'player_client': ['default', 'android_vr']}},
+    })
     
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
-            ydl.download([query])
-        
-        for file in output_dir.iterdir():
-            if file.suffix == '.mp3':
-                return str(file)
-    except Exception as e:
-        logger.error(f"Song download failed: {e}")
+    for i, ydl_opts in enumerate(attempts):
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
+                ydl.download([query])
+            
+            for file in output_dir.iterdir():
+                if file.suffix == '.mp3':
+                    return str(file)
+        except Exception as e:
+            error_msg = str(e).lower()
+            if i == 0 and ("sign in" in error_msg or "bot" in error_msg or "cookies" in error_msg):
+                logger.warning("YouTube cookies expired for song download, retrying without cookies...")
+                continue
+            logger.error(f"Song download failed: {e}")
     
     return None
 
