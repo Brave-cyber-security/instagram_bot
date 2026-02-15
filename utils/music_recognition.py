@@ -176,8 +176,6 @@ def _sync_download_song(query: str, output_dir: Path) -> str | None:
         'no_warnings': True,
         'default_search': 'ytsearch1',
         'ffmpeg_location': ffmpeg_path,
-        'js_runtimes': {'node': {}, 'deno': {}},
-        'remote_components': ['ejs:github'],
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -185,35 +183,51 @@ def _sync_download_song(query: str, output_dir: Path) -> str | None:
         }],
     }
     
-    # Avval cookiessiz (PO token), keyin cookies bilan sinash
-    attempts = []
-    # 1. Cookiessiz variant (PO token bilan)
-    attempts.append({
-        **base_opts,
-        'extractor_args': {'youtube': {'player_client': ['web']}},
-    })
-    # 2. Cookies bilan variant (fallback)
-    if YOUTUBE_COOKIES_FILE:
-        attempts.append({
+    # Bir nechta strategiya bilan sinash
+    strategies: list[tuple[str, dict[str, object]]] = [
+        ("web_creator+cookies", {
             **base_opts,
-            'cookiefile': str(YOUTUBE_COOKIES_FILE),
-            'extractor_args': {'youtube': {'player_client': ['web']}},
-        })
+            'cookiefile': str(YOUTUBE_COOKIES_FILE) if YOUTUBE_COOKIES_FILE else None,
+            'extractor_args': {'youtube': {'player_client': ['web_creator']}},
+        }),
+        ("mweb", {
+            **base_opts,
+            'extractor_args': {'youtube': {'player_client': ['mweb']}},
+        }),
+        ("ios", {
+            **base_opts,
+            'extractor_args': {'youtube': {'player_client': ['ios']}},
+        }),
+    ]
+    # cookiefile=None bo'lsa, o'chirish
+    for _, opts in strategies:
+        if opts.get('cookiefile') is None:
+            opts.pop('cookiefile', None)
     
-    for i, ydl_opts in enumerate(attempts):
+    for label, ydl_opts in strategies:
+        # Oldingi urinishdan qolgan fayllarni tozalash
+        for f in output_dir.iterdir():
+            try:
+                f.unlink()
+            except Exception:
+                pass
+        
         try:
+            logger.info(f"Song download strategy: {label}")
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
                 ydl.download([query])
             
             for file in output_dir.iterdir():
                 if file.suffix == '.mp3':
+                    logger.info(f"Song download '{label}' succeeded!")
                     return str(file)
         except Exception as e:
             error_msg = str(e).lower()
-            if i < len(attempts) - 1 and ("sign in" in error_msg or "bot" in error_msg or "cookies" in error_msg):
-                logger.warning("PO token failed for song download, retrying with cookies...")
+            if "sign in" in error_msg or "bot" in error_msg or "cookies" in error_msg:
+                logger.warning(f"Song download '{label}' blocked, trying next...")
                 continue
-            logger.error(f"Song download failed: {e}")
+            logger.error(f"Song download '{label}' failed: {e}")
+            continue
     
     return None
 

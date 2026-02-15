@@ -13,6 +13,12 @@ from config import TEMP_DIR, MAX_FILE_SIZE
 logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=3)
 
+# Diagnostic: log yt-dlp version and plugins on import
+try:
+    logger.info(f"yt-dlp version: {yt_dlp.version.__version__}")
+except Exception:
+    pass
+
 QUALITY_OPTIONS = [
     {"id": "1080", "label": "1080p (Full HD)", "format": "bestvideo[height<=1080]+bestaudio/best[height<=1080]"},
     {"id": "720", "label": "720p (HD)", "format": "bestvideo[height<=720]+bestaudio/best[height<=720]"},
@@ -65,64 +71,114 @@ def get_cached_url(url_hash: str) -> str | None:
     return _url_cache.get(url_hash)
 
 
-def _get_common_ydl_opts(use_cookies: bool = True) -> dict[str, Any]:
-    """yt-dlp uchun umumiy sozlamalar.
-    
-    PO token plugin (bgutil-ytdlp-pot-provider) avtomatik ishlaydi.
-    Cookies faqat fallback sifatida ishlatiladi.
-    """
-    from config import YOUTUBE_COOKIES_FILE
-    
-    opts: dict[str, Any] = {
+def _get_base_opts() -> dict[str, Any]:
+    """Asosiy yt-dlp sozlamalari (player_client va cookies yo'q)."""
+    return {
         'quiet': True,
         'no_warnings': True,
         'js_runtimes': {'node': {}, 'deno': {}},
         'remote_components': ['ejs:github'],
-        'extractor_args': {'youtube': {
-            'player_client': ['web'],
-        }},
     }
+
+
+def _get_strategies() -> list[dict[str, Any]]:
+    """YouTube uchun sinab ko'rish strategiyalari.
     
-    if use_cookies and YOUTUBE_COOKIES_FILE:
-        opts['cookiefile'] = str(YOUTUBE_COOKIES_FILE)
-        logger.info("Using YouTube cookies")
-    else:
-        logger.info("Using YouTube without cookies (PO token)")
+    Har bir strategiya — player_client + cookies kombinatsiyasi.
+    Birinchi ishlagani ishlatiladi.
+    """
+    from config import YOUTUBE_COOKIES_FILE
     
-    return opts
+    strategies: list[dict[str, Any]] = []
+    
+    # 1. web_creator + cookies (eng ishonchli)
+    if YOUTUBE_COOKIES_FILE:
+        strategies.append({
+            'label': 'web_creator + cookies',
+            'extractor_args': {'youtube': {'player_client': ['web_creator']}},
+            'cookiefile': str(YOUTUBE_COOKIES_FILE),
+        })
+    
+    # 2. mweb (mobile web, ko'pincha bot tekshiruv yo'q)
+    strategies.append({
+        'label': 'mweb (no cookies)',
+        'extractor_args': {'youtube': {'player_client': ['mweb']}},
+    })
+    
+    # 3. web + cookies
+    if YOUTUBE_COOKIES_FILE:
+        strategies.append({
+            'label': 'web + cookies',
+            'extractor_args': {'youtube': {'player_client': ['web']}},
+            'cookiefile': str(YOUTUBE_COOKIES_FILE),
+        })
+    
+    # 4. ios (cookies kerak emas)
+    strategies.append({
+        'label': 'ios (no cookies)',
+        'extractor_args': {'youtube': {'player_client': ['ios']}},
+    })
+    
+    # 5. android (cookies kerak emas)
+    strategies.append({
+        'label': 'android (no cookies)',
+        'extractor_args': {'youtube': {'player_client': ['android']}},
+    })
+    
+    return strategies
+
+
+def _is_bot_error(error_msg: str) -> bool:
+    """YouTube bot detection xatosimi?"""
+    lower = error_msg.lower()
+    return "sign in" in lower or "bot" in lower or "confirm" in lower
+
+
+def _classify_error(error_msg: str) -> str:
+    """Xato turini aniqlash."""
+    lower = error_msg.lower()
+    if "private" in lower:
+        return "private"
+    if "unavailable" in lower or "not available" in lower:
+        return "not_found"
+    if "age" in lower:
+        return "age_restricted"
+    return "unknown"
 
 
 def _sync_get_video_info(url: str) -> dict[str, Any]:
-    # 1. Avval cookiessiz sinash (PO token bilan)
-    ydl_opts: dict[str, Any] = {
-        **_get_common_ydl_opts(use_cookies=False),
-        'extract_flat': False,
-    }
+    strategies = _get_strategies()
+    last_error = None
     
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
-            info = ydl.extract_info(url, download=False)
-            return dict(info)  # type: ignore[arg-type]
-    except Exception as e:
-        error_msg = str(e).lower()
-        if "sign in" in error_msg or "bot" in error_msg or "cookies" in error_msg:
-            # 2. Cookies bilan qayta sinash
-            from config import YOUTUBE_COOKIES_FILE
-            if YOUTUBE_COOKIES_FILE:
-                logger.warning("PO token failed, retrying with cookies...")
-                ydl_opts = {
-                    **_get_common_ydl_opts(use_cookies=True),
-                    'extract_flat': False,
-                }
-                try:
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
-                        info = ydl.extract_info(url, download=False)
-                        return dict(info)  # type: ignore[arg-type]
-                except Exception as e2:
-                    logger.error(f"Error getting video info (with cookies): {e2}")
-                    raise YouTubeDownloadError(str(e2), "info_failed")
-        logger.error(f"Error getting video info: {e}")
-        raise YouTubeDownloadError(str(e), "info_failed")
+    for strategy in strategies:
+        label = strategy.pop('label')
+        ydl_opts: dict[str, Any] = {
+            **_get_base_opts(),
+            **strategy,
+            'extract_flat': False,
+        }
+        strategy['label'] = label  # restore for next use
+        
+        try:
+            logger.info(f"Trying strategy: {label}")
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
+                info = ydl.extract_info(url, download=False)
+                logger.info(f"Strategy '{label}' succeeded!")
+                return dict(info)  # type: ignore[arg-type]
+        except Exception as e:
+            last_error = e
+            error_msg = str(e)
+            if _is_bot_error(error_msg):
+                logger.warning(f"Strategy '{label}' blocked by YouTube, trying next...")
+                continue
+            # Bot xatosi emas — boshqa muammo
+            error_type = _classify_error(error_msg)
+            if error_type != "unknown":
+                raise YouTubeDownloadError(error_msg, error_type)
+            logger.error(f"Strategy '{label}' failed: {e}")
+            continue
+    
+    raise YouTubeDownloadError(str(last_error), "info_failed")
 
 
 async def get_video_info(url: str) -> YouTubeVideoInfo:
@@ -170,66 +226,54 @@ def _sync_download_video(url: str, quality: str, download_dir: Path) -> dict[str
             format_str = "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best"
         merge_format = 'mp4'
     
-    ydl_opts: dict[str, Any] = {
-        **_get_common_ydl_opts(use_cookies=False),
-        'format': format_str,
-        'outtmpl': output_template,
-        'quiet': True,
-        'no_warnings': True,
-        'merge_output_format': merge_format,
-        'ffmpeg_location': ffmpeg_path,
-        'postprocessors': [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': 'mp3',
-            'preferredquality': '192',
-        }] if is_audio else [],
-    }
+    strategies = _get_strategies()
+    last_error = None
     
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
-            info = ydl.extract_info(url, download=True)
-            return dict(info)  # type: ignore[arg-type]
-    except Exception as e:
-        error_msg = str(e).lower()
-        # PO token ishlamadi — cookies bilan qayta urinish
-        if "sign in" in error_msg or "bot" in error_msg or "cookies" in error_msg:
-            from config import YOUTUBE_COOKIES_FILE
-            if YOUTUBE_COOKIES_FILE:
-                logger.warning("PO token failed during download, retrying with cookies...")
-                ydl_opts_cookies: dict[str, Any] = {
-                    **_get_common_ydl_opts(use_cookies=True),
-                    'format': format_str,
-                    'outtmpl': output_template,
-                    'quiet': True,
-                    'no_warnings': True,
-                    'merge_output_format': merge_format,
-                    'ffmpeg_location': ffmpeg_path,
-                    'postprocessors': [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '192',
-                    }] if is_audio else [],
-                }
-                try:
-                    with yt_dlp.YoutubeDL(ydl_opts_cookies) as ydl:  # type: ignore[arg-type]
-                        info = ydl.extract_info(url, download=True)
-                        return dict(info)  # type: ignore[arg-type]
-                except Exception as e2:
-                    error_msg2 = str(e2).lower()
-                    if "private" in error_msg2:
-                        raise YouTubeDownloadError("Video is private", "private")
-                    if "unavailable" in error_msg2 or "not available" in error_msg2:
-                        raise YouTubeDownloadError("Video is unavailable", "not_found")
-                    if "age" in error_msg2:
-                        raise YouTubeDownloadError("Age-restricted video", "age_restricted")
-                    raise YouTubeDownloadError(str(e2), "download_failed")
-        if "private" in error_msg:
-            raise YouTubeDownloadError("Video is private", "private")
-        if "unavailable" in error_msg or "not available" in error_msg:
-            raise YouTubeDownloadError("Video is unavailable", "not_found")
-        if "age" in error_msg:
-            raise YouTubeDownloadError("Age-restricted video", "age_restricted")
-        raise YouTubeDownloadError(str(e), "download_failed")
+    for strategy in strategies:
+        label = strategy.pop('label')
+        ydl_opts: dict[str, Any] = {
+            **_get_base_opts(),
+            **strategy,
+            'format': format_str,
+            'outtmpl': output_template,
+            'quiet': True,
+            'no_warnings': True,
+            'merge_output_format': merge_format,
+            'ffmpeg_location': ffmpeg_path,
+            'postprocessors': [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }] if is_audio else [],
+        }
+        strategy['label'] = label  # restore
+        
+        # Har bir strategiyadan oldin temp fayllarni tozalash
+        for f in download_dir.iterdir():
+            try:
+                f.unlink()
+            except Exception:
+                pass
+        
+        try:
+            logger.info(f"Download strategy: {label}")
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:  # type: ignore[arg-type]
+                info = ydl.extract_info(url, download=True)
+                logger.info(f"Download strategy '{label}' succeeded!")
+                return dict(info)  # type: ignore[arg-type]
+        except Exception as e:
+            last_error = e
+            error_msg = str(e)
+            if _is_bot_error(error_msg):
+                logger.warning(f"Download strategy '{label}' blocked, trying next...")
+                continue
+            error_type = _classify_error(error_msg)
+            if error_type != "unknown":
+                raise YouTubeDownloadError(error_msg, error_type)
+            logger.error(f"Download strategy '{label}' failed: {e}")
+            continue
+    
+    raise YouTubeDownloadError(str(last_error), "download_failed")
 
 
 async def download_youtube_video(url: str, quality: str) -> YouTubeDownloadResult:
