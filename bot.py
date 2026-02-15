@@ -46,7 +46,7 @@ async def main() -> None:
     session = None
     if LOCAL_BOT_API and LOCAL_BOT_API_URL:
         api_url = LOCAL_BOT_API_URL.rstrip('/')
-        server = TelegramAPIServer.from_base(f"{api_url}/bot{{token}}/{{method}}")
+        server = TelegramAPIServer.from_base(api_url)
         session = AiohttpSession(api=server)
         logger.info(f"Using Local Bot API: {api_url}")
     else:
