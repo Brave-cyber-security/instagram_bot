@@ -185,19 +185,20 @@ def _sync_download_song(query: str, output_dir: Path) -> str | None:
         }],
     }
     
-    # Avval cookies bilan, keyin cookiessiz sinash
+    # Avval cookiessiz (PO token), keyin cookies bilan sinash
     attempts = []
+    # 1. Cookiessiz variant (PO token bilan)
+    attempts.append({
+        **base_opts,
+        'extractor_args': {'youtube': {'player_client': ['web']}},
+    })
+    # 2. Cookies bilan variant (fallback)
     if YOUTUBE_COOKIES_FILE:
         attempts.append({
             **base_opts,
             'cookiefile': str(YOUTUBE_COOKIES_FILE),
             'extractor_args': {'youtube': {'player_client': ['web']}},
         })
-    # Cookiessiz variant (fallback)
-    attempts.append({
-        **base_opts,
-        'extractor_args': {'youtube': {'player_client': ['web']}},
-    })
     
     for i, ydl_opts in enumerate(attempts):
         try:
@@ -209,8 +210,8 @@ def _sync_download_song(query: str, output_dir: Path) -> str | None:
                     return str(file)
         except Exception as e:
             error_msg = str(e).lower()
-            if i == 0 and ("sign in" in error_msg or "bot" in error_msg or "cookies" in error_msg):
-                logger.warning("YouTube cookies expired for song download, retrying without cookies...")
+            if i < len(attempts) - 1 and ("sign in" in error_msg or "bot" in error_msg or "cookies" in error_msg):
+                logger.warning("PO token failed for song download, retrying with cookies...")
                 continue
             logger.error(f"Song download failed: {e}")
     
