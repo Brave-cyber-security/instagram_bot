@@ -2,11 +2,14 @@ import asyncio
 import hashlib
 import logging
 import os
+import re
 import shutil
+import subprocess
 import uuid
 from pathlib import Path
 from typing import Any, TypedDict
 from concurrent.futures import ThreadPoolExecutor
+import requests
 import yt_dlp
 from config import TEMP_DIR, MAX_FILE_SIZE
 
@@ -76,8 +79,7 @@ def _get_base_opts() -> dict[str, Any]:
     return {
         'quiet': True,
         'no_warnings': True,
-        'js_runtimes': {'node': {}, 'deno': {}},
-        'remote_components': ['ejs:github'],
+        'noplaylist': True,
     }
 
 
@@ -146,6 +148,195 @@ def _classify_error(error_msg: str) -> str:
     return "unknown"
 
 
+# ===== Piped API fallback (YouTube bot detection uchun) =====
+
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.adminforge.de",
+    "https://api.piped.projectsegfau.lt",
+    "https://pipedapi.r4fo.com",
+]
+
+
+def _extract_video_id(url: str) -> str | None:
+    """YouTube URL dan video ID ajratib olish."""
+    match = re.search(
+        r'(?:youtube\.com/(?:watch\?v=|shorts/|embed/)|youtu\.be/)([\w-]+)', url
+    )
+    return match.group(1) if match else None
+
+
+def _piped_get_streams(video_id: str) -> dict[str, Any] | None:
+    """Piped API orqali video stream ma'lumotlarini olish."""
+    for instance in PIPED_INSTANCES:
+        try:
+            resp = requests.get(
+                f"{instance}/streams/{video_id}",
+                timeout=15,
+                headers={'User-Agent': 'Mozilla/5.0'}
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('title'):
+                    logger.info(f"Piped API ({instance}) succeeded")
+                    return data
+        except Exception as e:
+            logger.warning(f"Piped {instance} failed: {e}")
+            continue
+    return None
+
+
+def _download_stream_file(url: str, output_path: Path) -> bool:
+    """Stream URL dan faylni yuklab olish."""
+    try:
+        resp = requests.get(
+            url, stream=True, timeout=120,
+            headers={'User-Agent': 'Mozilla/5.0'}
+        )
+        resp.raise_for_status()
+        with open(output_path, 'wb') as f:
+            for chunk in resp.iter_content(chunk_size=65536):
+                f.write(chunk)
+        return output_path.stat().st_size > 0
+    except Exception as e:
+        logger.error(f"Stream download failed: {e}")
+        return False
+
+
+def _merge_av(video_path: Path, audio_path: Path, output_path: Path) -> bool:
+    """FFmpeg bilan video va audio birlashtirish."""
+    from config import get_ffmpeg_path
+    ffmpeg = get_ffmpeg_path()
+    try:
+        subprocess.run([
+            ffmpeg, '-y',
+            '-i', str(video_path),
+            '-i', str(audio_path),
+            '-c:v', 'copy', '-c:a', 'aac',
+            '-movflags', '+faststart',
+            str(output_path)
+        ], capture_output=True, timeout=180, check=True)
+        return output_path.exists()
+    except Exception as e:
+        logger.error(f"FFmpeg merge failed: {e}")
+        return False
+
+
+def _piped_get_video_info(url: str) -> dict[str, Any] | None:
+    """Piped orqali video info olish (yt-dlp ishlamasa)."""
+    video_id = _extract_video_id(url)
+    if not video_id:
+        return None
+
+    data = _piped_get_streams(video_id)
+    if not data:
+        return None
+
+    return {
+        'title': data.get('title', 'Unknown'),
+        'duration': data.get('duration', 0),
+        'thumbnail': data.get('thumbnailUrl', ''),
+        'uploader': data.get('uploader', 'Unknown'),
+        'webpage_url': url,
+    }
+
+
+def _piped_download_video(
+    url: str, quality: str, download_dir: Path
+) -> dict[str, Any] | None:
+    """Piped orqali video yuklab olish (yt-dlp ishlamasa)."""
+    video_id = _extract_video_id(url)
+    if not video_id:
+        return None
+
+    data = _piped_get_streams(video_id)
+    if not data:
+        return None
+
+    title = data.get('title', 'video')[:50]
+    safe_title = re.sub(r'[^\w\s-]', '', title).strip() or 'video'
+    is_audio = quality == "audio"
+
+    if is_audio:
+        audio_streams = data.get('audioStreams', [])
+        if not audio_streams:
+            return None
+        best_audio = max(audio_streams, key=lambda s: s.get('bitrate', 0))
+        tmp_path = download_dir / f"{safe_title}_tmp.m4a"
+        if not _download_stream_file(best_audio['url'], tmp_path):
+            return None
+        # MP3 ga o'girish
+        from config import get_ffmpeg_path
+        mp3_path = download_dir / f"{safe_title}.mp3"
+        try:
+            subprocess.run([
+                get_ffmpeg_path(), '-y', '-i', str(tmp_path),
+                '-codec:a', 'libmp3lame', '-qscale:a', '2',
+                str(mp3_path)
+            ], capture_output=True, timeout=120, check=True)
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            mp3_path = tmp_path  # Konvertatsiya ishlamasa, asl faylni qaytarish
+    else:
+        target_h = int(quality) if quality in ["1080", "720", "480", "360"] else 720
+        video_streams = data.get('videoStreams', [])
+        audio_streams = data.get('audioStreams', [])
+        if not video_streams:
+            return None
+
+        # MP4 video stream topish
+        mp4_vids = [
+            s for s in video_streams
+            if 'video/mp4' in s.get('mimeType', '')
+        ] or video_streams
+        suitable = [s for s in mp4_vids if (s.get('height') or 0) <= target_h]
+        if suitable:
+            best_video = max(suitable, key=lambda s: s.get('height') or 0)
+        else:
+            best_video = min(mp4_vids, key=lambda s: s.get('height') or 0)
+
+        video_only = best_video.get('videoOnly', True)
+
+        if not video_only:
+            # Combined stream
+            output_path = download_dir / f"{safe_title}.mp4"
+            if not _download_stream_file(best_video['url'], output_path):
+                return None
+        else:
+            # Video + Audio alohida yuklab, birlashtirish
+            vid_tmp = download_dir / f"{safe_title}_v.mp4"
+            if not _download_stream_file(best_video['url'], vid_tmp):
+                return None
+
+            m4a_audios = [
+                s for s in audio_streams
+                if 'audio/mp4' in s.get('mimeType', '')
+                   or 'audio/m4a' in s.get('mimeType', '')
+            ] or audio_streams
+
+            output_path = download_dir / f"{safe_title}.mp4"
+            if m4a_audios:
+                best_aud = max(m4a_audios, key=lambda s: s.get('bitrate', 0))
+                aud_tmp = download_dir / f"{safe_title}_a.m4a"
+                if _download_stream_file(best_aud['url'], aud_tmp):
+                    if _merge_av(vid_tmp, aud_tmp, output_path):
+                        vid_tmp.unlink(missing_ok=True)
+                        aud_tmp.unlink(missing_ok=True)
+                    else:
+                        aud_tmp.unlink(missing_ok=True)
+                        vid_tmp.rename(output_path)
+                else:
+                    vid_tmp.rename(output_path)
+            else:
+                vid_tmp.rename(output_path)
+
+    logger.info(f"Piped download completed: {safe_title}")
+    return {
+        'title': data.get('title', 'Unknown'),
+        'duration': data.get('duration', 0),
+    }
+
+
 def _sync_get_video_info(url: str) -> dict[str, Any]:
     strategies = _get_strategies()
     last_error = None
@@ -178,6 +369,12 @@ def _sync_get_video_info(url: str) -> dict[str, Any]:
             logger.error(f"Strategy '{label}' failed: {e}")
             continue
     
+    # Barcha yt-dlp strategiyalari ishlamadi — Piped API bilan sinash
+    logger.info("All yt-dlp strategies failed, trying Piped API...")
+    piped_info = _piped_get_video_info(url)
+    if piped_info:
+        return piped_info
+
     raise YouTubeDownloadError(str(last_error), "info_failed")
 
 
@@ -273,6 +470,12 @@ def _sync_download_video(url: str, quality: str, download_dir: Path) -> dict[str
             logger.error(f"Download strategy '{label}' failed: {e}")
             continue
     
+    # Barcha yt-dlp strategiyalari ishlamadi — Piped API bilan sinash
+    logger.info("All yt-dlp strategies failed, trying Piped API download...")
+    piped_result = _piped_download_video(url, quality, download_dir)
+    if piped_result:
+        return piped_result
+
     raise YouTubeDownloadError(str(last_error), "download_failed")
 
 
