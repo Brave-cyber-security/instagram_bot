@@ -93,7 +93,25 @@ def _get_strategies() -> list[dict[str, Any]]:
     
     strategies: list[dict[str, Any]] = []
     
-    # 1. web_creator + cookies (eng ishonchli)
+    # 1. android (cookies kerak emas, hozir eng ishonchli)
+    strategies.append({
+        'label': 'android (no cookies)',
+        'extractor_args': {'youtube': {'player_client': ['android']}},
+    })
+    
+    # 2. ios (cookies kerak emas)
+    strategies.append({
+        'label': 'ios (no cookies)',
+        'extractor_args': {'youtube': {'player_client': ['ios']}},
+    })
+    
+    # 3. mweb (mobile web, ko'pincha bot tekshiruv yo'q)
+    strategies.append({
+        'label': 'mweb (no cookies)',
+        'extractor_args': {'youtube': {'player_client': ['mweb']}},
+    })
+    
+    # 4. web_creator + cookies
     if YOUTUBE_COOKIES_FILE:
         strategies.append({
             'label': 'web_creator + cookies',
@@ -101,31 +119,13 @@ def _get_strategies() -> list[dict[str, Any]]:
             'cookiefile': str(YOUTUBE_COOKIES_FILE),
         })
     
-    # 2. mweb (mobile web, ko'pincha bot tekshiruv yo'q)
-    strategies.append({
-        'label': 'mweb (no cookies)',
-        'extractor_args': {'youtube': {'player_client': ['mweb']}},
-    })
-    
-    # 3. web + cookies
+    # 5. web + cookies
     if YOUTUBE_COOKIES_FILE:
         strategies.append({
             'label': 'web + cookies',
             'extractor_args': {'youtube': {'player_client': ['web']}},
             'cookiefile': str(YOUTUBE_COOKIES_FILE),
         })
-    
-    # 4. ios (cookies kerak emas)
-    strategies.append({
-        'label': 'ios (no cookies)',
-        'extractor_args': {'youtube': {'player_client': ['ios']}},
-    })
-    
-    # 5. android (cookies kerak emas)
-    strategies.append({
-        'label': 'android (no cookies)',
-        'extractor_args': {'youtube': {'player_client': ['android']}},
-    })
     
     return strategies
 

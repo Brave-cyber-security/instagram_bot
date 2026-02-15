@@ -3,10 +3,12 @@ import aiohttp
 import base64
 import json
 import logging
+import re
 import shutil
 import subprocess
 from pathlib import Path
 from typing import TypedDict
+import requests
 import yt_dlp
 from shazamio import Shazam, Serialize
 from concurrent.futures import ThreadPoolExecutor
@@ -185,6 +187,10 @@ def _sync_download_song(query: str, output_dir: Path) -> str | None:
     
     # Bir nechta strategiya bilan sinash
     strategies: list[tuple[str, dict[str, object]]] = [
+        ("android", {
+            **base_opts,
+            'extractor_args': {'youtube': {'player_client': ['android']}},
+        }),
         ("web_creator+cookies", {
             **base_opts,
             'cookiefile': str(YOUTUBE_COOKIES_FILE) if YOUTUBE_COOKIES_FILE else None,
@@ -227,6 +233,108 @@ def _sync_download_song(query: str, output_dir: Path) -> str | None:
                 logger.warning(f"Song download '{label}' blocked, trying next...")
                 continue
             logger.error(f"Song download '{label}' failed: {e}")
+            continue
+    
+    # Barcha yt-dlp strategiyalar ishlamadi — Piped API bilan sinash
+    logger.info("All yt-dlp song strategies failed, trying Piped API...")
+    return _piped_download_song(query, output_dir)
+
+
+# ===== Piped API fallback for song download =====
+
+PIPED_INSTANCES = [
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.adminforge.de",
+    "https://api.piped.projectsegfau.lt",
+    "https://pipedapi.r4fo.com",
+]
+
+
+def _piped_download_song(query: str, output_dir: Path) -> str | None:
+    """Piped API orqali qo'shiqni qidirish va yuklab olish."""
+    ffmpeg_path = get_ffmpeg_path()
+    
+    # 1. Piped orqali qidirish
+    video_id = None
+    for instance in PIPED_INSTANCES:
+        try:
+            resp = requests.get(
+                f"{instance}/search",
+                params={'q': query, 'filter': 'music_songs'},
+                timeout=15,
+                headers={'User-Agent': 'Mozilla/5.0'}
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                items = data.get('items', [])
+                if items:
+                    url_path = items[0].get('url', '')
+                    match = re.search(r'v=([\\w-]+)', url_path)
+                    if not match:
+                        match = re.search(r'/shorts/([\\w-]+)', url_path)
+                    if match:
+                        video_id = match.group(1)
+                        logger.info(f"Piped search found: {video_id} on {instance}")
+                        break
+        except Exception as e:
+            logger.warning(f"Piped search {instance} failed: {e}")
+            continue
+    
+    if not video_id:
+        logger.error("Piped: no search results")
+        return None
+    
+    # 2. Piped orqali stream olish
+    for instance in PIPED_INSTANCES:
+        try:
+            resp = requests.get(
+                f"{instance}/streams/{video_id}",
+                timeout=15,
+                headers={'User-Agent': 'Mozilla/5.0'}
+            )
+            if resp.status_code != 200:
+                continue
+            streams = resp.json()
+            audio_streams = streams.get('audioStreams', [])
+            if not audio_streams:
+                continue
+            
+            best_audio = max(audio_streams, key=lambda s: s.get('bitrate', 0))
+            title = streams.get('title', 'song')[:50]
+            safe_title = re.sub(r'[^\\w\\s-]', '', title).strip() or 'song'
+            
+            # 3. Audio yuklab olish
+            tmp_path = output_dir / f"{safe_title}_tmp.m4a"
+            audio_resp = requests.get(
+                best_audio['url'], stream=True, timeout=120,
+                headers={'User-Agent': 'Mozilla/5.0'}
+            )
+            audio_resp.raise_for_status()
+            with open(tmp_path, 'wb') as f:
+                for chunk in audio_resp.iter_content(chunk_size=65536):
+                    f.write(chunk)
+            
+            if tmp_path.stat().st_size == 0:
+                tmp_path.unlink(missing_ok=True)
+                continue
+            
+            # 4. MP3 ga o'girish
+            mp3_path = output_dir / f"{safe_title}.mp3"
+            try:
+                subprocess.run([
+                    ffmpeg_path, '-y', '-i', str(tmp_path),
+                    '-codec:a', 'libmp3lame', '-qscale:a', '2',
+                    str(mp3_path)
+                ], capture_output=True, timeout=120, check=True)
+                tmp_path.unlink(missing_ok=True)
+                logger.info(f"Piped song download succeeded: {safe_title}")
+                return str(mp3_path)
+            except Exception:
+                if tmp_path.exists():
+                    logger.info("FFmpeg failed, returning raw audio")
+                    return str(tmp_path)
+        except Exception as e:
+            logger.warning(f"Piped stream {instance} failed: {e}")
             continue
     
     return None
