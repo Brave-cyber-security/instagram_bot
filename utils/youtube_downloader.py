@@ -93,37 +93,43 @@ def _get_strategies() -> list[dict[str, Any]]:
     
     strategies: list[dict[str, Any]] = []
     
-    # 1. android (cookies kerak emas, hozir eng ishonchli)
+    # 1. tv_embedded (eng kam bloklangan)
+    strategies.append({
+        'label': 'tv_embedded (no cookies)',
+        'extractor_args': {'youtube': {'player_client': ['tv_embedded']}},
+    })
+    
+    # 2. android (cookies kerak emas)
     strategies.append({
         'label': 'android (no cookies)',
         'extractor_args': {'youtube': {'player_client': ['android']}},
     })
     
-    # 2. ios (cookies kerak emas)
+    # 3. ios (cookies kerak emas)
     strategies.append({
         'label': 'ios (no cookies)',
         'extractor_args': {'youtube': {'player_client': ['ios']}},
     })
     
-    # 3. mweb (mobile web, ko'pincha bot tekshiruv yo'q)
+    # 4. mweb (mobile web, ko'pincha bot tekshiruv yo'q)
     strategies.append({
         'label': 'mweb (no cookies)',
         'extractor_args': {'youtube': {'player_client': ['mweb']}},
     })
     
-    # 4. web_creator + cookies
+    # 5. web_creator + cookies (webpage skip)
     if YOUTUBE_COOKIES_FILE:
         strategies.append({
             'label': 'web_creator + cookies',
-            'extractor_args': {'youtube': {'player_client': ['web_creator']}},
+            'extractor_args': {'youtube': {'player_client': ['web_creator'], 'player_skip': ['webpage']}},
             'cookiefile': str(YOUTUBE_COOKIES_FILE),
         })
     
-    # 5. web + cookies
+    # 6. web + cookies (webpage skip)
     if YOUTUBE_COOKIES_FILE:
         strategies.append({
             'label': 'web + cookies',
-            'extractor_args': {'youtube': {'player_client': ['web']}},
+            'extractor_args': {'youtube': {'player_client': ['web'], 'player_skip': ['webpage']}},
             'cookiefile': str(YOUTUBE_COOKIES_FILE),
         })
     
@@ -152,11 +158,19 @@ def _classify_error(error_msg: str) -> str:
 
 PIPED_INSTANCES = [
     "https://pipedapi.kavin.rocks",
-    "https://pipedapi.leptons.xyz",
-    "https://pipedapi.mha.fi",
-    "https://api.piped.yt",
+    "https://api.piped.privacydev.net",
+    "https://pipedapi.darkness.services",
+    "https://pipedapi.osphost.fi",
 ]
 
+INVIDIOUS_INSTANCES = [
+    "https://inv.nadeko.net",
+    "https://invidious.nerdvpn.de",
+    "https://iv.datura.network",
+    "https://inv.tux.pizza",
+]
+
+COBALT_API_KEY = os.getenv("COBALT_API_KEY", "")
 COBALT_INSTANCES = [
     "https://api.cobalt.tools",
 ]
@@ -348,6 +362,153 @@ def _piped_download_video(
     }
 
 
+# ===== Invidious API fallback =====
+
+def _parse_quality_label(label: str) -> int:
+    """'720p' → 720, 'unknown' → 0."""
+    m = re.search(r'(\d+)p', str(label))
+    return int(m.group(1)) if m else 0
+
+
+def _invidious_get_video_info(url: str) -> dict[str, Any] | None:
+    """Invidious API orqali video info olish."""
+    video_id = _extract_video_id(url)
+    if not video_id:
+        return None
+    for instance in INVIDIOUS_INSTANCES:
+        try:
+            logger.info(f"Trying Invidious info: {instance}")
+            resp = requests.get(
+                f"{instance}/api/v1/videos/{video_id}",
+                timeout=15,
+                headers={'User-Agent': 'Mozilla/5.0'},
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get('title'):
+                    thumbs = data.get('videoThumbnails', [])
+                    thumbnail = thumbs[0]['url'] if thumbs else ''
+                    logger.info(f"Invidious info ({instance}) succeeded")
+                    return {
+                        'title': data['title'],
+                        'duration': data.get('lengthSeconds', 0),
+                        'thumbnail': thumbnail,
+                        'uploader': data.get('author', 'Unknown'),
+                        'webpage_url': url,
+                    }
+            else:
+                logger.warning(f"Invidious {instance}: status {resp.status_code}")
+        except Exception as e:
+            logger.warning(f"Invidious {instance} failed: {e}")
+    return None
+
+
+def _invidious_download_video(
+    url: str, quality: str, download_dir: Path
+) -> dict[str, Any] | None:
+    """Invidious API orqali video yuklab olish."""
+    video_id = _extract_video_id(url)
+    if not video_id:
+        return None
+
+    for instance in INVIDIOUS_INSTANCES:
+        try:
+            logger.info(f"Trying Invidious download: {instance}")
+            resp = requests.get(
+                f"{instance}/api/v1/videos/{video_id}",
+                timeout=15,
+                headers={'User-Agent': 'Mozilla/5.0'},
+            )
+            if resp.status_code != 200:
+                logger.warning(f"Invidious {instance}: status {resp.status_code}")
+                continue
+
+            data = resp.json()
+            if not data.get('title'):
+                continue
+
+            title = data.get('title', 'video')[:50]
+            safe_title = re.sub(r'[^\w\s-]', '', title).strip() or 'video'
+            is_audio = quality == "audio"
+            adaptive = data.get('adaptiveFormats', [])
+            combined = data.get('formatStreams', [])
+
+            if is_audio:
+                audios = [f for f in adaptive if f.get('type', '').startswith('audio/')]
+                if not audios:
+                    continue
+                best = max(audios, key=lambda f: int(f.get('bitrate', '0')))
+                tmp = download_dir / f"{safe_title}_tmp.m4a"
+                if not _download_stream_file(best['url'], tmp):
+                    continue
+                from config import get_ffmpeg_path
+                mp3 = download_dir / f"{safe_title}.mp3"
+                try:
+                    subprocess.run([
+                        get_ffmpeg_path(), '-y', '-i', str(tmp),
+                        '-codec:a', 'libmp3lame', '-qscale:a', '2', str(mp3)
+                    ], capture_output=True, timeout=120, check=True)
+                    tmp.unlink(missing_ok=True)
+                except Exception:
+                    mp3 = tmp
+            else:
+                target_h = int(quality) if quality in ["1080", "720", "480", "360"] else 720
+                videos = [f for f in adaptive if f.get('type', '').startswith('video/')]
+                audios = [f for f in adaptive if f.get('type', '').startswith('audio/')]
+
+                if videos:
+                    suitable = [
+                        v for v in videos
+                        if _parse_quality_label(v.get('qualityLabel', '')) <= target_h
+                    ]
+                    if suitable:
+                        best_v = max(
+                            suitable,
+                            key=lambda f: _parse_quality_label(f.get('qualityLabel', '')),
+                        )
+                    else:
+                        best_v = min(
+                            videos,
+                            key=lambda f: _parse_quality_label(f.get('qualityLabel', '')) or 9999,
+                        )
+
+                    vid_tmp = download_dir / f"{safe_title}_v.mp4"
+                    if not _download_stream_file(best_v['url'], vid_tmp):
+                        continue
+
+                    output = download_dir / f"{safe_title}.mp4"
+                    if audios:
+                        best_a = max(audios, key=lambda f: int(f.get('bitrate', '0')))
+                        aud_tmp = download_dir / f"{safe_title}_a.m4a"
+                        if _download_stream_file(best_a['url'], aud_tmp):
+                            if _merge_av(vid_tmp, aud_tmp, output):
+                                vid_tmp.unlink(missing_ok=True)
+                                aud_tmp.unlink(missing_ok=True)
+                            else:
+                                aud_tmp.unlink(missing_ok=True)
+                                vid_tmp.rename(output)
+                        else:
+                            vid_tmp.rename(output)
+                    else:
+                        vid_tmp.rename(output)
+                elif combined:
+                    output = download_dir / f"{safe_title}.mp4"
+                    if not _download_stream_file(combined[0]['url'], output):
+                        continue
+                else:
+                    continue
+
+            logger.info(f"Invidious download completed: {safe_title}")
+            return {
+                'title': data.get('title', 'Unknown'),
+                'duration': data.get('lengthSeconds', 0),
+            }
+        except Exception as e:
+            logger.warning(f"Invidious {instance} download failed: {e}")
+            continue
+    return None
+
+
 # ===== Cobalt API fallback =====
 
 def _cobalt_download(url: str, quality: str, download_dir: Path) -> dict[str, Any] | None:
@@ -364,19 +525,26 @@ def _cobalt_download(url: str, quality: str, download_dir: Path) -> dict[str, An
                 payload['videoQuality'] = quality
             
             logger.info(f"Trying Cobalt: {instance}")
+            headers = {
+                'Accept': 'application/json',
+                'Content-Type': 'application/json',
+                'User-Agent': 'Mozilla/5.0',
+            }
+            if COBALT_API_KEY:
+                headers['Authorization'] = f'Api-Key {COBALT_API_KEY}'
             resp = requests.post(
                 instance,
                 json=payload,
                 timeout=30,
-                headers={
-                    'Accept': 'application/json',
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'Mozilla/5.0',
-                },
+                headers=headers,
             )
             
             if resp.status_code != 200:
-                logger.warning(f"Cobalt {instance}: status {resp.status_code}")
+                try:
+                    body = resp.text[:300]
+                except Exception:
+                    body = ""
+                logger.warning(f"Cobalt {instance}: status {resp.status_code}, body: {body}")
                 continue
             
             data = resp.json()
@@ -457,6 +625,12 @@ def _sync_get_video_info(url: str) -> dict[str, Any]:
     piped_info = _piped_get_video_info(url)
     if piped_info:
         return piped_info
+
+    # Piped ishlamadi — Invidious API bilan sinash
+    logger.info("Piped failed, trying Invidious API...")
+    invidious_info = _invidious_get_video_info(url)
+    if invidious_info:
+        return invidious_info
 
     raise YouTubeDownloadError(str(last_error), "info_failed")
 
@@ -559,8 +733,14 @@ def _sync_download_video(url: str, quality: str, download_dir: Path) -> dict[str
     if piped_result:
         return piped_result
 
-    # Piped ham ishlamadi — Cobalt API bilan sinash
-    logger.info("Piped failed, trying Cobalt API...")
+    # Piped ham ishlamadi — Invidious API bilan sinash
+    logger.info("Piped failed, trying Invidious API...")
+    invidious_result = _invidious_download_video(url, quality, download_dir)
+    if invidious_result:
+        return invidious_result
+
+    # Invidious ham ishlamadi — Cobalt API bilan sinash
+    logger.info("Invidious failed, trying Cobalt API...")
     cobalt_result = _cobalt_download(url, quality, download_dir)
     if cobalt_result:
         return cobalt_result

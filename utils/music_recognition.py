@@ -187,6 +187,10 @@ def _sync_download_song(query: str, output_dir: Path) -> str | None:
     
     # Bir nechta strategiya bilan sinash
     strategies: list[tuple[str, dict[str, object]]] = [
+        ("tv_embedded", {
+            **base_opts,
+            'extractor_args': {'youtube': {'player_client': ['tv_embedded']}},
+        }),
         ("android", {
             **base_opts,
             'extractor_args': {'youtube': {'player_client': ['android']}},
@@ -244,9 +248,9 @@ def _sync_download_song(query: str, output_dir: Path) -> str | None:
 
 PIPED_INSTANCES = [
     "https://pipedapi.kavin.rocks",
-    "https://pipedapi.leptons.xyz",
-    "https://pipedapi.mha.fi",
-    "https://api.piped.yt",
+    "https://api.piped.privacydev.net",
+    "https://pipedapi.darkness.services",
+    "https://pipedapi.osphost.fi",
 ]
 
 

@@ -243,6 +243,14 @@ def _sync_download_post(shortcode: str, download_dir: Path) -> tuple[list[str], 
                         f.unlink()
                     except Exception:
                         pass
+            elif 'please wait' in str(e).lower() or '429' in str(e):
+                # Rate limit — no-auth fallback sinash
+                logger.warning(f"Rate limited with cookies, trying no-auth: {e}")
+                for f in download_dir.iterdir():
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
             else:
                 # Auth bilan bog'liq bo'lmagan xato
                 _handle_instaloader_error(e, shortcode)
@@ -273,7 +281,7 @@ def _handle_instaloader_error(e: Exception, context: str = "") -> None:
     if isinstance(e, instaloader.exceptions.QueryReturnedNotFoundException):
         raise DownloadError("Content not found", "not_found")
     if isinstance(e, instaloader.exceptions.ConnectionException):
-        if "429" in str(e):
+        if "429" in str(e) or "please wait" in str(e).lower():
             raise DownloadError("Rate limited, please try again later", "rate_limit")
         if _is_auth_error(e):
             raise DownloadError("Authentication error", "private")
@@ -348,6 +356,14 @@ def _sync_download_story(username: str, story_id: str, download_dir: Path) -> tu
                         pass
             elif isinstance(e, DownloadError):
                 raise
+            elif 'please wait' in str(e).lower() or '429' in str(e):
+                # Rate limit — no-auth fallback sinash
+                logger.warning(f"Story rate limited with cookies, trying no-auth: {e}")
+                for f in download_dir.iterdir():
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
             else:
                 _handle_instaloader_error(e, f"story {story_id}")
     
