@@ -191,12 +191,12 @@ def _sync_download_song(query: str, output_dir: Path) -> str | None:
         attempts.append({
             **base_opts,
             'cookiefile': str(YOUTUBE_COOKIES_FILE),
-            'extractor_args': {'youtube': {'player_client': ['default']}},
+            'extractor_args': {'youtube': {'player_client': ['web_creator', 'mediaconnect']}},
         })
     # Cookiessiz variant (fallback)
     attempts.append({
         **base_opts,
-        'extractor_args': {'youtube': {'player_client': ['default', 'android_vr']}},
+        'extractor_args': {'youtube': {'player_client': ['web_creator', 'mediaconnect']}},
     })
     
     for i, ydl_opts in enumerate(attempts):

@@ -83,12 +83,12 @@ def _get_common_ydl_opts(use_cookies: bool = True) -> dict[str, Any]:
     if use_cookies and YOUTUBE_COOKIES_FILE:
         opts['cookiefile'] = str(YOUTUBE_COOKIES_FILE)
         opts['extractor_args'] = {'youtube': {
-            'player_client': ['default'],
+            'player_client': ['web_creator', 'mediaconnect'],
         }}
         logger.info("Using YouTube cookies for authentication")
     else:
         opts['extractor_args'] = {'youtube': {
-            'player_client': ['default', 'android_vr'],
+            'player_client': ['web_creator', 'mediaconnect'],
         }}
         if not use_cookies:
             logger.info("Retrying YouTube without cookies")
