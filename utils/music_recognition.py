@@ -244,9 +244,9 @@ def _sync_download_song(query: str, output_dir: Path) -> str | None:
 
 PIPED_INSTANCES = [
     "https://pipedapi.kavin.rocks",
-    "https://pipedapi.adminforge.de",
-    "https://api.piped.projectsegfau.lt",
-    "https://pipedapi.r4fo.com",
+    "https://pipedapi.leptons.xyz",
+    "https://pipedapi.mha.fi",
+    "https://api.piped.yt",
 ]
 
 
@@ -262,16 +262,17 @@ def _piped_download_song(query: str, output_dir: Path) -> str | None:
                 f"{instance}/search",
                 params={'q': query, 'filter': 'music_songs'},
                 timeout=15,
-                headers={'User-Agent': 'Mozilla/5.0'}
+                headers={'User-Agent': 'Mozilla/5.0'},
+                allow_redirects=False,
             )
             if resp.status_code == 200:
                 data = resp.json()
                 items = data.get('items', [])
                 if items:
                     url_path = items[0].get('url', '')
-                    match = re.search(r'v=([\\w-]+)', url_path)
+                    match = re.search(r'v=([\w-]+)', url_path)
                     if not match:
-                        match = re.search(r'/shorts/([\\w-]+)', url_path)
+                        match = re.search(r'/shorts/([\w-]+)', url_path)
                     if match:
                         video_id = match.group(1)
                         logger.info(f"Piped search found: {video_id} on {instance}")
@@ -290,7 +291,8 @@ def _piped_download_song(query: str, output_dir: Path) -> str | None:
             resp = requests.get(
                 f"{instance}/streams/{video_id}",
                 timeout=15,
-                headers={'User-Agent': 'Mozilla/5.0'}
+                headers={'User-Agent': 'Mozilla/5.0'},
+                allow_redirects=False,
             )
             if resp.status_code != 200:
                 continue
@@ -301,7 +303,7 @@ def _piped_download_song(query: str, output_dir: Path) -> str | None:
             
             best_audio = max(audio_streams, key=lambda s: s.get('bitrate', 0))
             title = streams.get('title', 'song')[:50]
-            safe_title = re.sub(r'[^\\w\\s-]', '', title).strip() or 'song'
+            safe_title = re.sub(r'[^\w\s-]', '', title).strip() or 'song'
             
             # 3. Audio yuklab olish
             tmp_path = output_dir / f"{safe_title}_tmp.m4a"

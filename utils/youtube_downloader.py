@@ -148,13 +148,17 @@ def _classify_error(error_msg: str) -> str:
     return "unknown"
 
 
-# ===== Piped API fallback (YouTube bot detection uchun) =====
+# ===== Piped / Cobalt API fallback (YouTube bot detection uchun) =====
 
 PIPED_INSTANCES = [
     "https://pipedapi.kavin.rocks",
-    "https://pipedapi.adminforge.de",
-    "https://api.piped.projectsegfau.lt",
-    "https://pipedapi.r4fo.com",
+    "https://pipedapi.leptons.xyz",
+    "https://pipedapi.mha.fi",
+    "https://api.piped.yt",
+]
+
+COBALT_INSTANCES = [
+    "https://api.cobalt.tools",
 ]
 
 
@@ -170,16 +174,23 @@ def _piped_get_streams(video_id: str) -> dict[str, Any] | None:
     """Piped API orqali video stream ma'lumotlarini olish."""
     for instance in PIPED_INSTANCES:
         try:
+            url = f"{instance}/streams/{video_id}"
+            logger.info(f"Trying Piped: {url}")
             resp = requests.get(
-                f"{instance}/streams/{video_id}",
+                url,
                 timeout=15,
-                headers={'User-Agent': 'Mozilla/5.0'}
+                headers={'User-Agent': 'Mozilla/5.0'},
+                allow_redirects=False,
             )
             if resp.status_code == 200:
                 data = resp.json()
                 if data.get('title'):
                     logger.info(f"Piped API ({instance}) succeeded")
                     return data
+                else:
+                    logger.warning(f"Piped {instance}: empty response")
+            else:
+                logger.warning(f"Piped {instance}: status {resp.status_code}")
         except Exception as e:
             logger.warning(f"Piped {instance} failed: {e}")
             continue
@@ -337,6 +348,78 @@ def _piped_download_video(
     }
 
 
+# ===== Cobalt API fallback =====
+
+def _cobalt_download(url: str, quality: str, download_dir: Path) -> dict[str, Any] | None:
+    """Cobalt API orqali video/audio yuklab olish."""
+    is_audio = quality == "audio"
+    
+    for instance in COBALT_INSTANCES:
+        try:
+            payload: dict[str, Any] = {
+                'url': url,
+                'downloadMode': 'audio' if is_audio else 'auto',
+            }
+            if not is_audio and quality in ["1080", "720", "480", "360"]:
+                payload['videoQuality'] = quality
+            
+            logger.info(f"Trying Cobalt: {instance}")
+            resp = requests.post(
+                instance,
+                json=payload,
+                timeout=30,
+                headers={
+                    'Accept': 'application/json',
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'Mozilla/5.0',
+                },
+            )
+            
+            if resp.status_code != 200:
+                logger.warning(f"Cobalt {instance}: status {resp.status_code}")
+                continue
+            
+            data = resp.json()
+            status = data.get('status', '')
+            
+            if status in ('tunnel', 'redirect'):
+                stream_url = data.get('url', '')
+                if not stream_url:
+                    continue
+                
+                ext = 'mp3' if is_audio else 'mp4'
+                output_path = download_dir / f"cobalt_video.{ext}"
+                
+                logger.info(f"Cobalt downloading: {status}")
+                if _download_stream_file(stream_url, output_path):
+                    logger.info("Cobalt download succeeded!")
+                    return {
+                        'title': 'YouTube Video',
+                        'duration': 0,
+                    }
+            elif status == 'picker':
+                # Multiple options - birinchisini olish
+                picker = data.get('picker', [])
+                if picker:
+                    stream_url = picker[0].get('url', '')
+                    if stream_url:
+                        ext = 'mp3' if is_audio else 'mp4'
+                        output_path = download_dir / f"cobalt_video.{ext}"
+                        if _download_stream_file(stream_url, output_path):
+                            logger.info("Cobalt picker download succeeded!")
+                            return {'title': 'YouTube Video', 'duration': 0}
+            elif status == 'error':
+                logger.warning(f"Cobalt error: {data.get('error', {}).get('code', 'unknown')}")
+            else:
+                logger.warning(f"Cobalt unknown status: {status}")
+                
+        except Exception as e:
+            logger.warning(f"Cobalt {instance} failed: {e}")
+            continue
+    
+    return None
+
+
 def _sync_get_video_info(url: str) -> dict[str, Any]:
     strategies = _get_strategies()
     last_error = None
@@ -475,6 +558,12 @@ def _sync_download_video(url: str, quality: str, download_dir: Path) -> dict[str
     piped_result = _piped_download_video(url, quality, download_dir)
     if piped_result:
         return piped_result
+
+    # Piped ham ishlamadi — Cobalt API bilan sinash
+    logger.info("Piped failed, trying Cobalt API...")
+    cobalt_result = _cobalt_download(url, quality, download_dir)
+    if cobalt_result:
+        return cobalt_result
 
     raise YouTubeDownloadError(str(last_error), "download_failed")
 

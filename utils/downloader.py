@@ -184,11 +184,14 @@ def _is_story_url(url: str) -> bool:
 
 
 def _is_auth_error(error: Exception) -> bool:
-    """Xato autentifikatsiya bilan bog'liqmi?"""
+    """Xato autentifikatsiya bilan bog'liqmi? (rate limit emas!)"""
     msg = str(error).lower()
+    # "please wait" = rate limit, auth xato emas
+    if 'please wait' in msg or '429' in msg:
+        return False
     return any(s in msg for s in [
-        '401', '403', 'logged_out', 'login_required',
-        'unauthorized', 'checkpoint_required', 'please wait'
+        'logged_out', 'login_required', 'user_has_logged_out',
+        'unauthorized', 'checkpoint_required',
     ])
 
 
