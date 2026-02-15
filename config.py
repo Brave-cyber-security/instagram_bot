@@ -24,7 +24,10 @@ if not YOUTUBE_COOKIES_FILE.exists():
     if not YOUTUBE_COOKIES_FILE.exists():
         YOUTUBE_COOKIES_FILE = None
 
-MAX_FILE_SIZE: int = 50 * 1024 * 1024
+# Telegram Bot API Server (local = 2GB, default = 50MB)
+LOCAL_BOT_API: bool = os.getenv("LOCAL_BOT_API_URL", "") != ""
+LOCAL_BOT_API_URL: str = os.getenv("LOCAL_BOT_API_URL", "")
+MAX_FILE_SIZE: int = 2000 * 1024 * 1024 if LOCAL_BOT_API else 50 * 1024 * 1024
 
 AUDD_API_TOKEN: str = os.getenv("AUDD_API_TOKEN", "")
 
@@ -141,7 +144,7 @@ MESSAGES = {
         "<code>https://www.youtube.com/watch?v=dQw4w9WgXcQ</code>\n"
         "<code>https://youtu.be/dQw4w9WgXcQ</code>\n\n"
         "⚠️ <b>Eslatma:</b>\n"
-        "• Telegram cheklovi: 50MB gacha\n"
+        "• Fayl cheklovi: 2GB gacha\n"
         "• Yopiq kontentni yuklab bo'lmaydi"
     ),
     "downloading": "⏳ Yuklab olinmoqda, iltimos kuting...",
@@ -151,7 +154,7 @@ MESSAGES = {
     "error_private": "🔒 Bu kontent yopiq (private). Faqat ochiq kontentni yuklab olish mumkin.",
     "error_not_found": "❌ Media topilmadi. URL to'g'riligini tekshiring.",
     "error_download": "❌ Yuklashda xatolik yuz berdi. Keyinroq qayta urinib ko'ring.",
-    "error_file_too_large": "❌ Fayl juda katta (50MB dan ortiq). Telegram cheklovi. Kichikroq sifat tanlang.",
+    "error_file_too_large": "❌ Fayl juda katta. Kichikroq sifat tanlang.",
     "error_age_restricted": "🔞 Bu kontent yosh cheklovi bilan himoyalangan.",
     "error_rate_limit": "⏱️ Cheklov qo'yildi. Bir necha daqiqadan keyin qayta urinib ko'ring.",
     "error_youtube_download": "❌ YouTube'dan yuklashda xatolik. Keyinroq qayta urinib ko'ring.",

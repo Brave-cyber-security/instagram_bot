@@ -5,9 +5,11 @@ from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
+from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.client.telegram import TelegramAPIServer
 from aiogram.enums import ParseMode
 
-from config import BOT_TOKEN
+from config import BOT_TOKEN, LOCAL_BOT_API, LOCAL_BOT_API_URL
 
 from handlers import start, help, message_handler
 from handlers import youtube_handler
@@ -40,9 +42,20 @@ async def main() -> None:
     
     logger.info("Starting Instagram + YouTube Downloader Bot...")
     
+    # Local Bot API server (2GB gacha fayl yuklash)
+    session = None
+    if LOCAL_BOT_API and LOCAL_BOT_API_URL:
+        api_url = LOCAL_BOT_API_URL.rstrip('/')
+        server = TelegramAPIServer.from_base(f"{api_url}/bot{{token}}/{{method}}")
+        session = AiohttpSession(api=server)
+        logger.info(f"Using Local Bot API: {api_url}")
+    else:
+        logger.info("Using official Telegram Bot API (50MB limit)")
+    
     bot = Bot(
         token=BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        session=session,
     )
     
     dp = Dispatcher()
